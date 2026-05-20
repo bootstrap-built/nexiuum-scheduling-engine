@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SSE Spike — Monday Apps Framework</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; padding: 20px; background: #0d0f13; color: #cdd2dc; line-height: 1.5; }
+  h1 { font-size: 18px; font-weight: 600; margin-bottom: 4px; }
+  .sub { font-size: 12px; color: #828a99; margin-bottom: 20px; }
+  .test { background: #13161c; border: 1px solid #262c38; padding: 16px; border-radius: 8px; margin: 16px 0; }
+  .test h2 { font-size: 13px; font-weight: 600; margin-bottom: 4px; color: #cdd2dc; }
+  .test .desc { font-size: 11px; color: #828a99; margin-bottom: 10px; }
+  .status { font-family: "SF Mono", Menlo, monospace; font-size: 11px; padding: 4px 10px; border-radius: 4px; display: inline-block; letter-spacing: .04em; }
+  .status.idle { background: #2c333f; color: #828a99; }
+  .status.connecting { background: #fdab3d; color: #04121d; }
+  .status.open { background: #39d98a; color: #04121d; }
+  .status.error { background: #df2f4a; color: #fff; }
+  .log { font-family: "SF Mono", Menlo, monospace; font-size: 11px; background: #0a0c10; border-radius: 4px; padding: 10px 12px; max-height: 220px; overflow-y: auto; margin-top: 10px; border: 1px solid #1d222b; }
+  .log .row { padding: 1px 0; word-break: break-word; }
+  .log .time { color: #5b6473; margin-right: 8px; }
+  .log .ok { color: #39d98a; }
+  .log .err { color: #e0653c; }
+  .log .info { color: #cdd2dc; }
+  .summary { font-size: 12px; color: #cdd2dc; background: #171b22; border: 1px solid #2c333f; padding: 12px 16px; border-radius: 8px; margin-top: 24px; }
+  .summary b { color: #39d98a; }
+  .meta { font-family: "SF Mono", Menlo, monospace; font-size: 10.5px; color: #5b6473; margin-top: 24px; }
+</style>
+</head>
+<body>
+<h1>Monday Apps Framework — SSE / External-Connect Spike</h1>
+<div class="sub">Phase 1.5B0 — Validates whether a Monday board-view iframe can open external HTTPS connections (including EventSource / SSE) to a non-Monday origin. If all three tests succeed, the v3 embedded-view architecture (engine → SSE → Marey renderer) is viable.</div>
+
+<div class="test">
+  <h2>Test 1 — External SSE (sse.dev/test)</h2>
+  <div class="desc">Opens an EventSource to a public SSE endpoint. Tests CSP <code>connect-src</code> and CORS for streaming endpoints.</div>
+  <span class="status idle" id="status-sse-dev">IDLE</span>
+  <div class="log" id="log-sse-dev"></div>
+</div>
+
+<div class="test">
+  <h2>Test 2 — Same-origin fetch (baseline)</h2>
+  <div class="desc">Plain <code>fetch()</code> against the iframe's own URL. Should always work. Sanity check that scripts run at all.</div>
+  <span class="status idle" id="status-pages">IDLE</span>
+  <div class="log" id="log-pages"></div>
+</div>
+
+<div class="test">
+  <h2>Test 3 — Monday SDK context handshake</h2>
+  <div class="desc">Loads <code>monday-sdk-js</code> and calls <code>monday.get('context')</code>. Confirms the iframe is actually running inside a Monday board view (not just embedded raw).</div>
+  <span class="status idle" id="status-context">IDLE</span>
+  <div class="log" id="log-context"></div>
+</div>
+
+<div class="summary">
+<b>Interpreting results:</b> All three OPEN/OK = full green. Test 1 ERROR + Tests 2/3 OK = Monday CSP is blocking external connect-src; we'd need to either proxy SSE through Monday's domain or pivot to polling. Tests 2/3 ERROR = iframe not loading scripts correctly (separate concern, possibly CSP <code>script-src</code>).
+</div>
+
+<div class="meta" id="meta"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/monday-sdk-js/dist/main.js"></script>
+<script>
+  function log(testId, msg, kind) {
+    const el = document.getElementById('log-' + testId);
+    const row = document.createElement('div');
+    row.className = 'row';
+    const time = new Date().toISOString().slice(11, 23);
+    const span = document.createElement('span');
+    span.className = kind || 'info';
+    span.textContent = msg;
+    row.innerHTML = '<span class="time">' + time + '</span>';
+    row.appendChild(span);
+    el.appendChild(row);
+    el.scrollTop = el.scrollHeight;
+  }
+  function setStatus(testId, state, label) {
+    const el = document.getElementById('status-' + testId);
+    el.className = 'status ' + state;
+    el.textContent = label;
+  }
+
+  document.getElementById('meta').textContent =
+    'host: ' + window.location.host + ' · path: ' + window.location.pathname + ' · parent: ' +
+    (window.parent === window ? 'self (not iframed)' : 'iframed');
+
+  // ─── Test 1: External SSE ────────────────────────────────────────────
+  setStatus('sse-dev', 'connecting', 'CONNECTING');
+  log('sse-dev', 'Opening EventSource to https://sse.dev/test', 'info');
+  let sseEventCount = 0;
+  try {
+    const es = new EventSource('https://sse.dev/test');
+    es.onopen = function () {
+      setStatus('sse-dev', 'open', 'OPEN');
+      log('sse-dev', 'Connection established', 'ok');
+    };
+    es.onmessage = function (e) {
+      sseEventCount++;
+      const preview = (e.data || '').slice(0, 80);
+      log('sse-dev', '#' + sseEventCount + ' ' + preview, 'ok');
+      if (sseEventCount >= 5) {
+        log('sse-dev', 'Received 5 events — closing test connection', 'info');
+        es.close();
+      }
+    };
+    es.onerror = function () {
+      if (es.readyState === EventSource.CLOSED) {
+        setStatus('sse-dev', 'error', 'CLOSED');
+        log('sse-dev', 'Connection closed — likely CSP block or sse.dev unavailable', 'err');
+      } else {
+        log('sse-dev', 'EventSource transient error (readyState=' + es.readyState + ')', 'err');
+      }
+    };
+  } catch (err) {
+    setStatus('sse-dev', 'error', 'ERROR');
+    log('sse-dev', 'Threw: ' + err.message, 'err');
+  }
+
+  // ─── Test 2: Same-origin fetch ───────────────────────────────────────
+  setStatus('pages', 'connecting', 'FETCHING');
+  log('pages', 'Fetching same-origin ' + window.location.pathname, 'info');
+  fetch(window.location.href).then(function (r) {
+    setStatus('pages', 'open', 'OK ' + r.status);
+    log('pages', 'Status ' + r.status + ' — same-origin works', 'ok');
+  }).catch(function (err) {
+    setStatus('pages', 'error', 'ERROR');
+    log('pages', 'Fetch failed: ' + err.message, 'err');
+  });
+
+  // ─── Test 3: Monday SDK context ──────────────────────────────────────
+  setStatus('context', 'connecting', 'INIT');
+  log('context', 'Initializing monday-sdk-js', 'info');
+  try {
+    if (!window.mondaySdk) {
+      setStatus('context', 'error', 'NO SDK');
+      log('context', 'monday-sdk-js not loaded from CDN', 'err');
+    } else {
+      const monday = window.mondaySdk();
+      let receivedContext = false;
+      monday.listen('context', function (res) {
+        receivedContext = true;
+        setStatus('context', 'open', 'OK');
+        log('context', 'context received', 'ok');
+        log('context', JSON.stringify(res.data || res).slice(0, 240), 'info');
+      });
+      monday.get('context').then(function (res) {
+        if (!receivedContext) {
+          setStatus('context', 'open', 'OK');
+          log('context', 'get(context) returned', 'ok');
+        }
+        log('context', JSON.stringify(res.data || res).slice(0, 240), 'info');
+      }).catch(function (err) {
+        log('context', 'get(context) error: ' + (err.message || JSON.stringify(err)), 'err');
+      });
+      setTimeout(function () {
+        if (!receivedContext) {
+          log('context', 'No context after 4s — iframe may not be inside a Monday board view', 'err');
+          if (document.getElementById('status-context').textContent === 'INIT') {
+            setStatus('context', 'error', 'NO CONTEXT');
+          }
+        }
+      }, 4000);
+    }
+  } catch (err) {
+    setStatus('context', 'error', 'ERROR');
+    log('context', 'Threw: ' + err.message, 'err');
+  }
+</script>
+</body>
+</html>

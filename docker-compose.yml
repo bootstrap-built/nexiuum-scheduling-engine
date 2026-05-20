@@ -1,0 +1,9 @@
+services:
+  scheduling-engine:
+    build: .
+    image: nexiuum-scheduling-engine:latest
+    container_name: nexiuum-scheduling-engine
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "8002:8002"
