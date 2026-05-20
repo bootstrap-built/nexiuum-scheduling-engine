@@ -32,8 +32,15 @@
 <div class="sub">Phase 1.5B0 — Validates whether a Monday board-view iframe can open external HTTPS connections (including EventSource / SSE) to a non-Monday origin. If all three tests succeed, the v3 embedded-view architecture (engine → SSE → Marey renderer) is viable.</div>
 
 <div class="test">
-  <h2>Test 1 — External SSE (sse.dev/test)</h2>
-  <div class="desc">Opens an EventSource to a public SSE endpoint. Tests CSP <code>connect-src</code> and CORS for streaming endpoints.</div>
+  <h2>Test 1a — External SSE (Wikimedia recent changes stream)</h2>
+  <div class="desc">Opens an EventSource to <code>stream.wikimedia.org</code>, Wikipedia's production SSE feed. Reliable real-time data, definitely up.</div>
+  <span class="status idle" id="status-wiki">IDLE</span>
+  <div class="log" id="log-wiki"></div>
+</div>
+
+<div class="test">
+  <h2>Test 1b — External SSE (sse.dev/test, redundancy)</h2>
+  <div class="desc">Second external SSE endpoint as a cross-check. If Wikimedia works but this doesn't, CSP is not the issue.</div>
   <span class="status idle" id="status-sse-dev">IDLE</span>
   <div class="log" id="log-sse-dev"></div>
 </div>
@@ -83,37 +90,49 @@
     'host: ' + window.location.host + ' · path: ' + window.location.pathname + ' · parent: ' +
     (window.parent === window ? 'self (not iframed)' : 'iframed');
 
-  // ─── Test 1: External SSE ────────────────────────────────────────────
-  setStatus('sse-dev', 'connecting', 'CONNECTING');
-  log('sse-dev', 'Opening EventSource to https://sse.dev/test', 'info');
-  let sseEventCount = 0;
-  try {
-    const es = new EventSource('https://sse.dev/test');
-    es.onopen = function () {
-      setStatus('sse-dev', 'open', 'OPEN');
-      log('sse-dev', 'Connection established', 'ok');
-    };
-    es.onmessage = function (e) {
-      sseEventCount++;
-      const preview = (e.data || '').slice(0, 80);
-      log('sse-dev', '#' + sseEventCount + ' ' + preview, 'ok');
-      if (sseEventCount >= 5) {
-        log('sse-dev', 'Received 5 events — closing test connection', 'info');
-        es.close();
-      }
-    };
-    es.onerror = function () {
-      if (es.readyState === EventSource.CLOSED) {
-        setStatus('sse-dev', 'error', 'CLOSED');
-        log('sse-dev', 'Connection closed — likely CSP block or sse.dev unavailable', 'err');
-      } else {
-        log('sse-dev', 'EventSource transient error (readyState=' + es.readyState + ')', 'err');
-      }
-    };
-  } catch (err) {
-    setStatus('sse-dev', 'error', 'ERROR');
-    log('sse-dev', 'Threw: ' + err.message, 'err');
+  // ─── Test 1a: Wikimedia SSE (reliable production endpoint) ───────────
+  function runSseTest(elId, url) {
+    setStatus(elId, 'connecting', 'CONNECTING');
+    log(elId, 'Opening EventSource to ' + url, 'info');
+    let count = 0;
+    try {
+      const es = new EventSource(url);
+      es.onopen = function () {
+        setStatus(elId, 'open', 'OPEN');
+        log(elId, 'Connection established', 'ok');
+      };
+      es.onmessage = function (e) {
+        count++;
+        const preview = (e.data || '').slice(0, 80);
+        log(elId, '#' + count + ' ' + preview, 'ok');
+        if (count >= 3) {
+          log(elId, 'Received 3 events — closing test connection', 'info');
+          es.close();
+        }
+      };
+      es.onerror = function () {
+        if (es.readyState === EventSource.CLOSED) {
+          setStatus(elId, 'error', 'CLOSED');
+          log(elId, 'Connection closed — CSP block or endpoint unavailable', 'err');
+        } else {
+          log(elId, 'EventSource transient error (readyState=' + es.readyState + ')', 'err');
+        }
+      };
+      // Hard timeout — if no events after 8s, declare failure
+      setTimeout(function () {
+        if (count === 0 && es.readyState !== EventSource.CLOSED) {
+          log(elId, 'No events after 8s — closing as inconclusive', 'err');
+          es.close();
+          setStatus(elId, 'error', 'NO EVENTS');
+        }
+      }, 8000);
+    } catch (err) {
+      setStatus(elId, 'error', 'ERROR');
+      log(elId, 'Threw: ' + err.message, 'err');
+    }
   }
+  runSseTest('wiki', 'https://stream.wikimedia.org/v2/stream/recentchange');
+  runSseTest('sse-dev', 'https://sse.dev/test');
 
   // ─── Test 2: Same-origin fetch ───────────────────────────────────────
   setStatus('pages', 'connecting', 'FETCHING');
