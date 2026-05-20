@@ -46,3 +46,22 @@ Report back what each box shows. I'll interpret + decide next steps from there.
 ## Cleanup when done
 
 After the spike's question is answered, the Monday app can be uninstalled from the workspace and deleted from the developer portal. The HTML stays in the repo as a reference / regression test.
+
+---
+
+## Spike result — 2026-05-20
+
+| Test | Result | Note |
+|---|---|---|
+| Test 1a — Wikimedia SSE | **OPEN** ✓ | External EventSource works inside a Monday board-view iframe. CSP does NOT block external `connect-src`. |
+| Test 1b — sse.dev/test | CLOSED | sse.dev itself is unreliable. Not a CSP issue. |
+| Test 2 — same-origin fetch | OK 200 ✓ | Baseline. |
+| Test 3 — Monday SDK context | OK ✓ | Account 33978185, MDT, US region. SDK loads and resolves. |
+
+**Conclusion:** Monday's iframe CSP would have allowed our planned SSE channel — the architectural risk we were testing for doesn't exist. **However**, we still chose to drop SSE from the v3 plan in favor of Monday SDK board events (`monday.listen('events', cb)`) because:
+- Same push semantics, but uses Monday's own real-time bus
+- Zero external connect-src needed → no future CSP surprise risk
+- No long-lived connection management on the engine side
+- One less moving piece in the architecture
+
+The decision is recorded in the v3 plan at `~/projects/clients/nexiuum/workflows/gray_space_scheduling/gray-space-scheduling-plan.md`. The spike artifact (`spike/index.html`) is retained as a reference for any future Monday iframe CSP question.

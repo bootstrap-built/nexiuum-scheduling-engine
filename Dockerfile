@@ -12,8 +12,7 @@ RUN pip install --no-cache-dir \
     "uvicorn[standard]>=0.32" \
     httpx>=0.27 \
     pydantic>=2.9 \
-    python-dotenv>=1.0 \
-    sse-starlette>=2.1
+    python-dotenv>=1.0
 
 COPY engine/ ./engine/
 

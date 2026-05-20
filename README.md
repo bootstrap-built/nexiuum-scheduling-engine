@@ -10,6 +10,8 @@ See `~/projects/clients/nexiuum/workflows/gray_space_scheduling/gray-space-sched
 
 TL;DR: pure-core placement function + async IO shell. Single worker, serialized write queue. Source-board webhooks bridge user-originated status flips into Schedule writes. CTP `/simulate` reads bypass the worker.
 
+Engine has no live-push channel. The embedded board view subscribes to Monday SDK board events directly — when the engine writes to Monday, every subscribed view receives a change event from Monday's own real-time bus and re-fetches via the SDK. Decided 2026-05-20 after the 1.5B0 spike confirmed Monday SDK events are sufficient and avoid SSE/CSP complexity.
+
 ## Monday boards
 
 | Board | ID | Purpose |
