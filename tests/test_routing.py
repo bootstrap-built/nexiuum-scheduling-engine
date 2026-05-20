@@ -198,3 +198,40 @@ def test_round_robin_oldest_finished_first():
     snap = _snap(older, newer)
     out = eligible_machines(snap, machine_class="Pressing", order=_order())
     assert [m.name for m in out] == ["Older", "Newer"]
+
+
+# ─── Force-route + max_job_size interaction ──────────────────────────────
+
+
+def test_force_route_respects_max_job_size_cap():
+    """If a force-routed machine has max_job_size set and the order exceeds it,
+    fall through to soft routing instead of returning the over-capacity machine.
+    """
+    gandalf = _machine("Gandalf", max_job_size=None)
+    # Imaginary "Mini-Lance" — a force-routed machine WITH a size cap.
+    mini_lance = _machine(
+        "Mini-Lance",
+        force_route_condition="active_mg > 80",
+        max_job_size=20000,
+    )
+    snap = _snap(gandalf, mini_lance)
+    order = _order(quantity=100000, active_mg=100)
+    out = eligible_machines(snap, machine_class="Pressing", order=order)
+    # Mini-Lance is force-route eligible but capped at 20k. 100k order doesn't
+    # fit. Should fall through to Gandalf rather than returning Mini-Lance.
+    assert "Mini-Lance" not in [m.name for m in out]
+    assert "Gandalf" in [m.name for m in out]
+
+
+def test_force_route_used_when_size_fits():
+    """If a force-routed machine's cap allows the order, force-route still wins."""
+    gandalf = _machine("Gandalf")
+    mini_lance = _machine(
+        "Mini-Lance",
+        force_route_condition="active_mg > 80",
+        max_job_size=20000,
+    )
+    snap = _snap(gandalf, mini_lance)
+    order = _order(quantity=10000, active_mg=100)  # under the 20k cap
+    out = eligible_machines(snap, machine_class="Pressing", order=order)
+    assert [m.name for m in out] == ["Mini-Lance"]

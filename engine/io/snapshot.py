@@ -145,11 +145,21 @@ def _mirror_text(cv: dict[str, Any] | None) -> str | None:
 
 def _parse_machine(item: dict[str, Any], s: Settings) -> Machine:
     cv = _cv_by_id(item)
-    status_text = _status_label(cv.get(s.col_cap_status)) or "Online"
+    status_text = _status_label(cv.get(s.col_cap_status))
     try:
-        status = MachineStatus(status_text)
+        # Empty / missing status — assume Online by convention (operator hasn't set it).
+        # Unrecognized label — default to DOWN as a safety measure so the engine
+        # doesn't schedule jobs on a machine whose state we can't parse.
+        if status_text is None or status_text == "":
+            status = MachineStatus.ONLINE
+        else:
+            status = MachineStatus(status_text)
     except ValueError:
-        status = MachineStatus.ONLINE
+        log.warning(
+            "Machine %r has unrecognized status label %r; defaulting to DOWN",
+            item.get("name"), status_text,
+        )
+        status = MachineStatus.DOWN
     process_group = _status_label(cv.get(s.col_cap_process_group))
     return Machine(
         id=str(item["id"]),
@@ -188,14 +198,29 @@ def _parse_recipe(item: dict[str, Any], s: Settings) -> Recipe:
         log.warning("Recipe %s has invalid stages JSON; treating as empty", item.get("id"))
         stages_parsed = []
 
-    stages = tuple(
-        RecipeStage(
-            id=str(s_entry.get("id", "")),
-            machine_class=s_entry.get("machine_class"),
-            depends_on=tuple(str(d) for d in (s_entry.get("depends_on") or [])),
+    # Validate machine_class against the canonical ProcessGroup labels. A typo
+    # in the recipe JSON would otherwise create an unroutable stage with a
+    # confusing error later — fail loud here instead.
+    valid_classes = {
+        "Pressing", "Capsule", "Sachet", "Blister",
+        "Clamshell", "Bottle", "Lot Coder", "Hand-pack",
+    }
+    stages_list = []
+    for s_entry in stages_parsed:
+        machine_class = s_entry.get("machine_class")
+        if machine_class not in valid_classes:
+            log.warning(
+                "Recipe %s stage %r has unknown machine_class %r; valid: %s",
+                item.get("id"), s_entry.get("id"), machine_class, sorted(valid_classes),
+            )
+        stages_list.append(
+            RecipeStage(
+                id=str(s_entry.get("id", "")),
+                machine_class=machine_class,
+                depends_on=tuple(str(d) for d in (s_entry.get("depends_on") or [])),
+            )
         )
-        for s_entry in stages_parsed
-    )
+    stages = tuple(stages_list)
 
     return Recipe(
         id=str(item["id"]),

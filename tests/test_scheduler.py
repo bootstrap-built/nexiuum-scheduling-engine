@@ -9,6 +9,7 @@ import pytest
 
 from engine.core.scheduler import (
     DanglingRecipeError,
+    InactiveRecipeError,
     UnroutableStageError,
     plan_for_new_order,
 )
@@ -118,6 +119,107 @@ def test_wrong_version_raises():
     snap = _snap([_machine("Gandalf")], [recipe_v2])
     with pytest.raises(DanglingRecipeError):
         plan_for_new_order(snap, _order(), now=NOW)  # asks for v1
+
+
+def test_draft_recipe_rejected_for_new_orders():
+    """A Draft recipe must not be used for new-order placement."""
+    draft = Recipe(
+        id="R1", name="tablet-press-standard v1",
+        recipe_key="tablet-press-standard", version=1,
+        status=RecipeStatus.DRAFT,
+        stages=(RecipeStage(id="press", machine_class="Pressing", depends_on=()),),
+    )
+    snap = _snap([_machine("Gandalf")], [draft])
+    with pytest.raises(InactiveRecipeError) as exc_info:
+        plan_for_new_order(snap, _order(), now=NOW)
+    assert exc_info.value.status == "Draft"
+
+
+def test_retired_recipe_rejected_for_new_orders():
+    """A Retired recipe must not be used for new-order placement."""
+    retired = Recipe(
+        id="R1", name="tablet-press-standard v1",
+        recipe_key="tablet-press-standard", version=1,
+        status=RecipeStatus.RETIRED,
+        stages=(RecipeStage(id="press", machine_class="Pressing", depends_on=()),),
+    )
+    snap = _snap([_machine("Gandalf")], [retired])
+    with pytest.raises(InactiveRecipeError) as exc_info:
+        plan_for_new_order(snap, _order(), now=NOW)
+    assert exc_info.value.status == "Retired"
+
+
+# ─── Topological sort edge cases ─────────────────────────────────────────
+
+
+def test_topo_sort_self_loop_raises():
+    """A stage that depends on itself must be detected as a cycle."""
+    self_loop = Recipe(
+        id="R1", name="bad", recipe_key="bad", version=1,
+        status=RecipeStatus.ACTIVE,
+        stages=(RecipeStage(id="a", machine_class="Pressing", depends_on=("a",)),),
+    )
+    snap = _snap([_machine("Gandalf")], [self_loop])
+    order = ScheduleNewOrder(
+        job_reference_id="N1", recipe_key="bad", recipe_version=1, quantity=1000,
+    )
+    with pytest.raises(ValueError, match="cycle"):
+        plan_for_new_order(snap, order, now=NOW)
+
+
+def test_topo_sort_two_node_cycle_raises():
+    """A→B and B→A — both stages permanently at indegree 1."""
+    cycle = Recipe(
+        id="R1", name="bad", recipe_key="bad", version=1,
+        status=RecipeStatus.ACTIVE,
+        stages=(
+            RecipeStage(id="a", machine_class="Pressing", depends_on=("b",)),
+            RecipeStage(id="b", machine_class="Pressing", depends_on=("a",)),
+        ),
+    )
+    snap = _snap([_machine("Gandalf")], [cycle])
+    order = ScheduleNewOrder(
+        job_reference_id="N1", recipe_key="bad", recipe_version=1, quantity=1000,
+    )
+    with pytest.raises(ValueError, match="cycle"):
+        plan_for_new_order(snap, order, now=NOW)
+
+
+# ─── UnroutableStageError reason discrimination ──────────────────────────
+
+
+def test_unroutable_no_machines_in_class():
+    """No machines of the required class — reason = no_machines_in_class."""
+    snap = _snap(
+        [_machine("Elphaba", process_group="Capsule")],
+        [_recipe_press_only()],
+    )
+    with pytest.raises(UnroutableStageError) as exc_info:
+        plan_for_new_order(snap, _order(), now=NOW)
+    assert exc_info.value.reason == "no_machines_in_class"
+
+
+def test_unroutable_all_machines_down():
+    """Machines exist but all Down — reason = all_machines_down."""
+    from engine.models import MachineStatus
+    gandalf = _machine("Gandalf")
+    # Mutate to Down by reconstructing (frozen dataclass)
+    down = Machine(
+        id=gandalf.id, name=gandalf.name, process_group=gandalf.process_group,
+        status=MachineStatus.DOWN, capacity_per_hour=gandalf.capacity_per_hour,
+        hours_per_day=gandalf.hours_per_day,
+        working_window_start=gandalf.working_window_start,
+        working_window_end=gandalf.working_window_end,
+        changeover_minutes=gandalf.changeover_minutes,
+        dual_sided_only=gandalf.dual_sided_only,
+        max_job_size=gandalf.max_job_size,
+        force_route_condition=gandalf.force_route_condition,
+        last_job_ended_at=gandalf.last_job_ended_at,
+    )
+    snap = _snap([down], [_recipe_press_only()])
+    with pytest.raises(UnroutableStageError) as exc_info:
+        plan_for_new_order(snap, _order(), now=NOW)
+    assert exc_info.value.reason == "all_machines_down"
 
 
 # ─── Single-stage placement (Phase 1) ────────────────────────────────────

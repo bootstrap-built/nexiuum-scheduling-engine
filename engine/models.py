@@ -257,6 +257,19 @@ class SlotWrite:
 
     Engine produces these as part of a Plan; IO shell applies them via
     GraphQL mutations.
+
+    Field semantics:
+    - `slot_id=None` → create a new slot. Otherwise → update the existing slot.
+    - A field set to a non-None value → write that value to the Schedule item.
+    - A field set to None → don't touch (no write for that column).
+    - To CLEAR a field (e.g., reset `actual_start` to empty), include its name
+      in `fields_to_clear`. The IO shell will send a Monday "clear column"
+      mutation for those columns regardless of any other value.
+
+    `fields_to_clear` is the explicit way to express "make this column empty"
+    because Python `None` is ambiguous (don't-touch vs make-empty). Without
+    this, the engine couldn't undo a false-positive actual_start write, for
+    example. Field names match SlotWrite attribute names (e.g., 'actual_start').
     """
 
     slot_id: str | None  # None means create a new slot
@@ -277,10 +290,7 @@ class SlotWrite:
     priority: Priority | None = None
     last_reflow_hash: str | None = None
     drift_last_detected_at: datetime | None = None
-    # Sentinel marking which fields the write should send. None values are
-    # ambiguous (don't-touch vs clear-it). The simplest interpretation: any
-    # field set to non-None is a value to write; explicit clearing uses a
-    # sentinel datetime/etc. as needed (handled in the writer adapter).
+    fields_to_clear: frozenset[str] = field(default_factory=frozenset)
 
 
 @dataclass(frozen=True)

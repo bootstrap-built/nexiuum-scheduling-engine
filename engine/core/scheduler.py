@@ -46,14 +46,40 @@ class DanglingRecipeError(RuntimeError):
         super().__init__(f"Recipe not found: {recipe_key} v{recipe_version}")
 
 
-class UnroutableStageError(RuntimeError):
-    """Raised when a stage has no eligible machine (none online or none match)."""
+class InactiveRecipeError(RuntimeError):
+    """Raised when a new order references a recipe that exists but isn't Active.
 
-    def __init__(self, stage_id: str, machine_class: str):
+    Draft and Retired recipes are NOT usable for new orders. In-flight slots
+    pinned to a retired version continue to resolve correctly (via composite
+    key) — only new-order placement is gated by this check.
+    """
+
+    def __init__(self, recipe_key: str, recipe_version: int, status: str):
+        self.recipe_key = recipe_key
+        self.recipe_version = recipe_version
+        self.status = status
+        super().__init__(
+            f"Recipe {recipe_key} v{recipe_version} is {status}; only Active recipes "
+            "can be used for new orders"
+        )
+
+
+class UnroutableStageError(RuntimeError):
+    """Raised when a stage has no eligible machine.
+
+    `reason` distinguishes the failure mode for operator visibility:
+    - 'no_machines_in_class' — Capacity Engine has zero machines of this class
+    - 'all_machines_down' — machines exist but all are Down or zero-capacity
+    - 'no_eligible_after_rules' — hard rules (dual-sided, force-route, max
+       job size) eliminated all candidates
+    """
+
+    def __init__(self, stage_id: str, machine_class: str, reason: str = "no_eligible_after_rules"):
         self.stage_id = stage_id
         self.machine_class = machine_class
+        self.reason = reason
         super().__init__(
-            f"No eligible machine for stage '{stage_id}' (class {machine_class})"
+            f"No eligible machine for stage '{stage_id}' (class {machine_class}): {reason}"
         )
 
 
@@ -94,9 +120,21 @@ def plan_for_new_order(
 
 
 def _resolve_recipe(snapshot: Snapshot, order: ScheduleNewOrder) -> Recipe:
+    """Look up the order's pinned recipe and gate on Active status.
+
+    Composite-key pinning is the v3 invariant — engine never falls back to a
+    different version. Status gate prevents new orders from using Draft
+    (work-in-progress) or Retired (removed-from-service) recipes. In-flight
+    slots that were pinned to a now-retired version still resolve correctly
+    here, but new-order placement (the caller, plan_for_new_order) refuses.
+    """
+    from engine.models import RecipeStatus  # noqa: PLC0415 — avoid import cycle
+
     recipe = snapshot.recipe_by_composite_key(order.recipe_key, order.recipe_version)
     if recipe is None:
         raise DanglingRecipeError(order.recipe_key, order.recipe_version)
+    if recipe.status != RecipeStatus.ACTIVE:
+        raise InactiveRecipeError(order.recipe_key, order.recipe_version, recipe.status.value)
     return recipe
 
 
@@ -163,7 +201,10 @@ def _place_stages(
             snapshot, machine_class=stage.machine_class, order=order,
         )
         if not candidates:
-            raise UnroutableStageError(stage.id, stage.machine_class)
+            raise UnroutableStageError(
+                stage.id, stage.machine_class,
+                reason=_diagnose_no_candidates(snapshot, stage.machine_class),
+            )
 
         # For each candidate, find its earliest start. Pick the machine with
         # the soonest start. Ties broken by routing order (candidates[0] wins).
@@ -194,13 +235,22 @@ def _place_stages(
 # ─────────────────────────────────────────────────────────────────────────
 
 
+def _diagnose_no_candidates(snapshot: Snapshot, machine_class: str) -> str:
+    """Categorize WHY no eligible machines were found, for operator visibility."""
+    in_class = [m for m in snapshot.machines if m.process_group == machine_class]
+    if not in_class:
+        return "no_machines_in_class"
+    online = [m for m in in_class if m.is_available]
+    if not online:
+        return "all_machines_down"
+    return "no_eligible_after_rules"
+
+
 def _build_slot_writes(
     order: ScheduleNewOrder,
     recipe: Recipe,
     placements: list[_StagePlacement],
 ) -> list[SlotWrite]:
-    machine_name_for: dict[str, str] = {}  # filled in by caller when applying
-
     writes: list[SlotWrite] = []
     for p in placements:
         # Name is `{job_ref} → {Machine}`; engine doesn't know machine name here,

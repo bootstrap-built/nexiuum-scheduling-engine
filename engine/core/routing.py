@@ -53,8 +53,15 @@ def eligible_machines(
         online = [m for m in online if not m.dual_sided_only]
 
     # ── Hard rule 2: force-route by condition (e.g., active_mg > 80 → Lancelot) ──
+    # Force-routed machines still respect max_job_size — a forced route to an
+    # over-capacity machine isn't a route at all. If the force-route candidate
+    # is capped out by quantity, fall through to soft routing on other machines.
     if order is not None and order.active_mg is not None:
         forced = [m for m in online if _matches_force_route(m, order)]
+        forced = [
+            m for m in forced
+            if m.max_job_size is None or order.quantity <= m.max_job_size
+        ]
         if forced:
             return forced
 
