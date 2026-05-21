@@ -14,11 +14,15 @@ import os
 
 from fastapi import FastAPI
 
+from engine.routes.simulate import router as simulate_router
+
 app = FastAPI(
     title="Nexiuum Scheduling Engine",
     version="0.1.0",
-    description="Phase 1.5 capacity & lead-time forecasting. Scaffolding stage.",
+    description="Phase 1.5 capacity & lead-time forecasting.",
 )
+
+app.include_router(simulate_router)
 
 
 @app.get("/health")
@@ -27,7 +31,6 @@ async def health() -> dict[str, str]:
     return {
         "status": "ok",
         "version": app.version,
-        "phase": "scaffolding",
     }
 
 
@@ -36,5 +39,5 @@ async def root() -> dict[str, str]:
     return {
         "service": "nexiuum-scheduling-engine",
         "version": app.version,
-        "see": "/docs for OpenAPI, /health for liveness",
+        "see": "/docs for OpenAPI, /health for liveness, /simulate for CTP",
     }
