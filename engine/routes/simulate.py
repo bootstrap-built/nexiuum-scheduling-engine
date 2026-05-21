@@ -18,7 +18,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from engine.config import get_settings
@@ -33,6 +33,21 @@ from engine.io.snapshot import read_snapshot
 from engine.models import ScheduleNewOrder, Snapshot
 
 router = APIRouter(tags=["simulate"])
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# FastAPI dependencies — overridable in tests via app.dependency_overrides
+# ─────────────────────────────────────────────────────────────────────────
+
+
+async def get_current_snapshot() -> Snapshot:
+    """Production dependency: fresh Monday read on every request."""
+    return await read_snapshot()
+
+
+def get_current_time() -> datetime:
+    """Production dependency: real wall-clock time in factory TZ."""
+    return now_local(get_settings().factory_tz)
 
 # Per Jason: padding factor for AM-facing quote dates. 20% pad on duration.
 DEFAULT_PAD_FACTOR = 0.20
@@ -176,17 +191,20 @@ def simulate_handler(req: SimulateRequest, snapshot: Snapshot, *, now: datetime)
 
 
 @router.post("/simulate", response_model=SimulateResponse, responses={400: {"model": SimulateError}})
-async def simulate_route(req: SimulateRequest) -> SimulateResponse:
+async def simulate_route(
+    req: SimulateRequest,
+    snapshot: Snapshot = Depends(get_current_snapshot),
+    now: datetime = Depends(get_current_time),
+) -> SimulateResponse:
     """POST /simulate — CTP lookup against the current Monday state.
 
-    Reads a fresh Snapshot on every request. Does NOT enqueue work or write
-    anything to Monday. Safe to call as often as needed without affecting
-    the live schedule.
-    """
-    s = get_settings()
-    snapshot = await read_snapshot()
-    now = now_local(s.factory_tz)
+    Reads a fresh Snapshot on every request via the `get_current_snapshot`
+    dependency. Does NOT enqueue work or write anything to Monday. Safe to
+    call as often as needed without affecting the live schedule.
 
+    Tests override the snapshot and now dependencies via
+    `app.dependency_overrides` to avoid touching Monday.
+    """
     try:
         return simulate_handler(req, snapshot, now=now)
     except DanglingRecipeError as e:
