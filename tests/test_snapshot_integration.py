@@ -7,17 +7,15 @@ Skipped unless GRAY_SPACE_MONDAY_TOKEN is set. Run with:
 
 from __future__ import annotations
 
-import os
-
 import pytest
 
 from engine.io.snapshot import read_snapshot
-from engine.models import MachineStatus, RecipeStatus, SlotStatus
-
+from engine.models import MachineStatus, RecipeStatus
+from tests.conftest import has_real_monday_token
 
 pytestmark = pytest.mark.skipif(
-    not os.environ.get("MONDAY_GRAYSPACE_TOKEN"),
-    reason="requires MONDAY_GRAYSPACE_TOKEN env var (source ~/.monday_tokens first)",
+    not has_real_monday_token(),
+    reason="requires real MONDAY_GRAYSPACE_TOKEN env var (source ~/.monday_tokens first)",
 )
 
 
@@ -81,22 +79,6 @@ async def test_snapshot_read_three_recipes():
     assert by_key["clamshell-tablet"].status == RecipeStatus.DRAFT
 
 
-@pytest.mark.asyncio
-async def test_snapshot_read_test_slot_resolves_relations():
-    """The N3236 → Gandalf test slot from 1.5B1 should resolve all links."""
-    snapshot = await read_snapshot()
-    slot = next((s for s in snapshot.slots if s.name.startswith("N3236")), None)
-    assert slot is not None, "Test slot from 1.5B1 not found — was it deleted?"
-
-    # Linked machine should be Gandalf the Gray
-    gandalf = next(m for m in snapshot.machines if m.name == "Gandalf the Gray")
-    assert slot.machine_id == gandalf.id
-
-    # Recipe pinning
-    assert slot.recipe_key == "tablet-press-standard"
-    assert slot.recipe_version == 1
-    assert slot.stage_id == "press"
-    assert slot.quantity == 100000
-
-    # Status
-    assert slot.status == SlotStatus.QUEUED
+# Removed: test_snapshot_read_test_slot_resolves_relations — the N3236 test
+# slot was a 1.5B1 verification artifact and has been deleted. Connect-Boards
+# parsing is now exercised by the apply_plan live smoke test instead.

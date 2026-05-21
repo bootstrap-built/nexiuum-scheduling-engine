@@ -7,21 +7,14 @@ dependency-injection plumbing. No Monday interaction — both `snapshot` and
 
 from __future__ import annotations
 
-import os
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
+from fastapi.testclient import TestClient
 
-# Set a dummy token before importing the app so pydantic-settings doesn't
-# choke on the missing env var. Real Monday calls are mocked out via
-# dependency overrides so the dummy token is never used.
-os.environ.setdefault("MONDAY_GRAYSPACE_TOKEN", "test-token-not-real")
-
-from fastapi.testclient import TestClient  # noqa: E402
-
-from engine.main import app  # noqa: E402
-from engine.models import (  # noqa: E402
+from engine.main import app
+from engine.models import (
     Machine,
     MachineStatus,
     Recipe,
@@ -29,7 +22,7 @@ from engine.models import (  # noqa: E402
     RecipeStatus,
     Snapshot,
 )
-from engine.routes.simulate import (  # noqa: E402
+from engine.routes.simulate import (
     get_current_snapshot,
     get_current_time,
 )

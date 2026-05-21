@@ -7,20 +7,14 @@ Live writes are tested separately (test_apply_live.py — requires token).
 from __future__ import annotations
 
 import json
-import os
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import pytest
 
-os.environ.setdefault("MONDAY_GRAYSPACE_TOKEN", "test-token-not-real")
-
-from engine.config import get_settings  # noqa: E402
-from engine.io.apply import (  # noqa: E402
-    _build_batched_mutation,
-    _build_column_values,
-)
-from engine.models import Plan, Priority, SlotStatus, SlotWrite  # noqa: E402
+from engine.config import get_settings
+from engine.io.apply import _build_batched_mutation, _build_column_values
+from engine.models import Plan, Priority, SlotStatus, SlotWrite
 
 TZ = ZoneInfo("America/Denver")
 SETTINGS = get_settings()
