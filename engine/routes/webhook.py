@@ -42,10 +42,13 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 
+from datetime import datetime, timezone
+
 from engine.config import get_settings
+from engine.core.timezone import now_local
 from engine.io.engine_identity import get_engine_user_id
 from engine.io.worker import WorkerNotRunning, enqueue_event
-from engine.models import CapacityChanged
+from engine.models import ActualStartReported, CapacityChanged
 
 router = APIRouter(tags=["webhook"])
 log = logging.getLogger(__name__)
@@ -123,12 +126,60 @@ async def webhook_monday(secret: str, request: Request) -> dict[str, Any]:
         return {"status": "received", "kind": "schedule_change_unhandled"}
 
     if board_id == s.gray_space_blend_records_board and pulse_id is not None:
-        # Source-board event — actuals processing is E5.
-        # TODO E5: filter by columnId == s.col_blend_status before dispatching.
-        log.info(
-            "blend-records event for pulse=%s type=%s (E5 handler pending)",
-            pulse_id, event_type,
-        )
-        return {"status": "received", "kind": "blend_records_unhandled"}
+        # E5: only react to Blend Status changes — every other column edit
+        # on Blend Records is operator metadata we don't track.
+        if event.get("columnId") != s.col_blend_status:
+            return {"status": "received", "kind": "blend_records_ignored_column"}
+
+        new_label = _extract_status_label(event.get("value"))
+        if new_label != s.blend_status_pressing_label:
+            log.info(
+                "blend-records status changed to %r (pulse=%s); only %r triggers actual_start",
+                new_label, pulse_id, s.blend_status_pressing_label,
+            )
+            return {"status": "received", "kind": "blend_records_status_not_actionable"}
+
+        # Use Monday's changedAt if available (more accurate than webhook
+        # receipt time); fall back to now() in factory tz.
+        actual_at = _resolve_actual_at(event, s.factory_tz)
+        try:
+            await enqueue_event(
+                ActualStartReported(
+                    job_reference_id=pulse_id,
+                    stage_id=s.blend_status_pressing_stage_id,
+                    actual_at=actual_at,
+                )
+            )
+        except WorkerNotRunning:
+            log.error("worker not running; dropping ActualStartReported for blend=%s", pulse_id)
+            return {"status": "dropped", "kind": "worker_unavailable"}
+        return {"status": "enqueued", "kind": "actual_start_reported"}
 
     return {"status": "received", "kind": "unrecognized_source"}
+
+
+def _extract_status_label(value: Any) -> str | None:
+    """Pull `label.text` out of a Monday status (color) column webhook value.
+
+    Webhook payload shape: `value` is a dict like
+    {"label": {"text": "Pressing", "index": 5, "style": {...}}, ...}
+    or None when the column was cleared. Returns None on any malformed shape.
+    """
+    if not isinstance(value, dict):
+        return None
+    label = value.get("label")
+    if not isinstance(label, dict):
+        return None
+    text = label.get("text")
+    return text if isinstance(text, str) else None
+
+
+def _resolve_actual_at(event: dict[str, Any], factory_tz: str):
+    """Prefer Monday's `changedAt` Unix timestamp; fall back to now()."""
+    changed_at = event.get("changedAt")
+    if isinstance(changed_at, (int, float)) and changed_at > 0:
+        # Monday sends Unix epoch seconds. Convert to local (factory) time
+        # for consistency with the rest of the engine's local-time convention.
+        from zoneinfo import ZoneInfo
+        return datetime.fromtimestamp(float(changed_at), tz=timezone.utc).astimezone(ZoneInfo(factory_tz))
+    return now_local(factory_tz)

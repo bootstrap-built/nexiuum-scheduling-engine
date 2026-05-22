@@ -175,3 +175,20 @@ def test_mutation_cv_var_is_valid_json():
     parsed = json.loads(vars_["cv_0"])
     assert parsed[SETTINGS.col_schedule_machine] == {"item_ids": [12047953695]}
     assert parsed[SETTINGS.col_schedule_status] == {"label": "Queued"}
+
+
+# ─── machine_writes guardrail ─────────────────────────────────────────────
+
+
+def test_apply_plan_raises_on_machine_writes():
+    """Codex E4 review #7: machine_writes must not silently drop."""
+    import asyncio
+    from engine.io.apply import apply_plan
+    from engine.models import MachineWrite
+
+    plan = Plan(
+        slot_writes=(),
+        machine_writes=(MachineWrite(machine_id="M1", last_job_ended_at=None),),
+    )
+    with pytest.raises(NotImplementedError, match="machine_writes not yet implemented"):
+        asyncio.run(apply_plan(plan))

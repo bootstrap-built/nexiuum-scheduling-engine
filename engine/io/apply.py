@@ -270,6 +270,16 @@ async def apply_plan(
     s = settings or get_settings()
     rh = reflow_hash or uuid.uuid4().hex
 
+    # Codex E4 review #7: machine_writes was silently dropped. Fail loudly
+    # until the IO shell actually applies them (needed for "Last job ended
+    # at" updates when actual_end work lands).
+    if plan.machine_writes:
+        raise NotImplementedError(
+            f"apply_plan: Plan.machine_writes not yet implemented "
+            f"(got {len(plan.machine_writes)} entries). "
+            f"Implement Capacity Engine writes before producing them."
+        )
+
     if not plan.slot_writes:
         return ApplyResult(reflow_hash=rh)
 

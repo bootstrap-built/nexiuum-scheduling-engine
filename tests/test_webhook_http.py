@@ -122,21 +122,83 @@ def test_webhook_capacity_engine_event_enqueues(client):
     mock_enq.assert_awaited_once()
 
 
-def test_webhook_blend_records_event_acknowledged(client):
-    """Blend Records events are acknowledged but not yet handled (E5)."""
+def test_webhook_blend_records_ignored_non_status_column(client):
+    """Blend Records edits on any column other than Blend Status are no-ops."""
     payload = {
         "event": {
-            "boardId": 18404836849,  # Blend Records
+            "boardId": 18404836849,
             "pulseId": 11801201557,
-            "type": "change_status_column_value",
+            "type": "update_column_value",
+            "columnId": "text_some_other_column",
             "userId": "different-user-456",
         }
     }
     resp = client.post(WEBHOOK_PATH, json=payload)
     assert resp.status_code == 200
-    body = resp.json()
-    assert body["status"] == "received"
-    assert body["kind"] == "blend_records_unhandled"
+    assert resp.json()["kind"] == "blend_records_ignored_column"
+
+
+def test_webhook_blend_records_status_not_pressing_acknowledged(client):
+    """Blend Status changing to anything other than Pressing → ack but no enqueue."""
+    payload = {
+        "event": {
+            "boardId": 18404836849,
+            "pulseId": 11801201557,
+            "type": "update_column_value",
+            "columnId": "color_mm1mb9cm",
+            "userId": "different-user-456",
+            "value": {"label": {"text": "Blending", "index": 2}},
+        }
+    }
+    resp = client.post(WEBHOOK_PATH, json=payload)
+    assert resp.status_code == 200
+    assert resp.json()["kind"] == "blend_records_status_not_actionable"
+
+
+def test_webhook_blend_records_pressing_enqueues_actual_start(client):
+    """Blend Status → Pressing fires an ActualStartReported event."""
+    payload = {
+        "event": {
+            "boardId": 18404836849,
+            "pulseId": 11801201557,
+            "type": "update_column_value",
+            "columnId": "color_mm1mb9cm",
+            "userId": "different-user-456",
+            "value": {"label": {"text": "Pressing", "index": 5}},
+            "changedAt": 1779879000,  # 2026-05-22 ~16:10 UTC
+        }
+    }
+    with patch("engine.routes.webhook.enqueue_event", new_callable=AsyncMock) as mock_enq:
+        resp = client.post(WEBHOOK_PATH, json=payload)
+    assert resp.status_code == 200
+    assert resp.json()["kind"] == "actual_start_reported"
+    mock_enq.assert_awaited_once()
+    # Inspect the enqueued event.
+    enqueued = mock_enq.await_args.args[0]
+    from engine.models import ActualStartReported
+    assert isinstance(enqueued, ActualStartReported)
+    assert enqueued.job_reference_id == "11801201557"
+    assert enqueued.stage_id == "press"
+
+
+def test_webhook_blend_records_pressing_falls_back_to_now_without_changed_at(client):
+    """Without changedAt, the engine uses now() — still enqueues a valid event."""
+    payload = {
+        "event": {
+            "boardId": 18404836849,
+            "pulseId": 11801201557,
+            "type": "update_column_value",
+            "columnId": "color_mm1mb9cm",
+            "userId": "different-user-456",
+            "value": {"label": {"text": "Pressing", "index": 5}},
+            # no changedAt
+        }
+    }
+    with patch("engine.routes.webhook.enqueue_event", new_callable=AsyncMock) as mock_enq:
+        resp = client.post(WEBHOOK_PATH, json=payload)
+    assert resp.status_code == 200
+    assert resp.json()["kind"] == "actual_start_reported"
+    mock_enq.assert_awaited_once()
 
 
 def test_webhook_unrecognized_source_acknowledged(client):

@@ -25,6 +25,7 @@ import logging
 from dataclasses import dataclass
 
 from engine.config import get_settings
+from engine.core.actuals import plan_for_actual_end, plan_for_actual_start
 from engine.core.scheduler import plan_for_new_order
 from engine.core.timezone import now_local
 from engine.io.apply import ApplyResult, apply_plan
@@ -95,28 +96,19 @@ async def process_event(event: Event) -> ApplyResult | None:
 
     if isinstance(event, ScheduleNewOrder):
         plan = plan_for_new_order(snapshot, event, now=now)
-        if not plan.slot_writes:
-            return None
-        result = await apply_plan(plan)
-        if not result.success:
-            log.error(
-                "apply_plan failed: errors=%s reflow_hash=%s",
-                result.errors, result.reflow_hash,
-            )
-            raise RuntimeError(f"apply_plan failed: {result.errors}")
-        log.info(
-            "ScheduleNewOrder applied: created=%s reflow_hash=%s",
-            result.created_slot_ids, result.reflow_hash,
-        )
-        return result
+        return await _apply_or_noop(plan, label="ScheduleNewOrder")
 
-    # ── Stubs for handlers not yet implemented (E5/E6 territory) ──
-    # The infrastructure is in place; specific reflow algorithms come next.
+    if isinstance(event, ActualStartReported):
+        plan = plan_for_actual_start(snapshot, event)
+        return await _apply_or_noop(plan, label="ActualStartReported")
+
+    if isinstance(event, ActualEndReported):
+        plan = plan_for_actual_end(snapshot, event)
+        return await _apply_or_noop(plan, label="ActualEndReported")
+
+    # ── Stubs for handlers not yet implemented (E6+) ──
     if isinstance(event, CapacityChanged):
         log.info("CapacityChanged event for machine %s — reflow not yet implemented", event.machine_id)
-        return None
-    if isinstance(event, (ActualStartReported, ActualEndReported)):
-        log.info("Actual event %s — handler not yet implemented", type(event).__name__)
         return None
     if isinstance(event, (ManualReschedule, ExpediteRequested, DriftDetected)):
         log.info("Event %s — handler not yet implemented", type(event).__name__)
@@ -124,6 +116,25 @@ async def process_event(event: Event) -> ApplyResult | None:
 
     log.warning("Unhandled event type: %s", type(event).__name__)
     return None
+
+
+async def _apply_or_noop(plan, *, label: str) -> ApplyResult | None:
+    """Shared apply tail: empty plan → no-op; apply → check success → log."""
+    if not plan.slot_writes:
+        log.info("%s: no-op (notes=%s)", label, list(plan.notes))
+        return None
+    result = await apply_plan(plan)
+    if not result.success:
+        log.error(
+            "%s apply_plan failed: errors=%s reflow_hash=%s",
+            label, result.errors, result.reflow_hash,
+        )
+        raise RuntimeError(f"apply_plan failed: {result.errors}")
+    log.info(
+        "%s applied: created=%s updated=%s reflow_hash=%s",
+        label, result.created_slot_ids, result.updated_slot_ids, result.reflow_hash,
+    )
+    return result
 
 
 # ─────────────────────────────────────────────────────────────────────────

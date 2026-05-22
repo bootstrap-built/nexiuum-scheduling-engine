@@ -80,6 +80,14 @@ class Settings(BaseSettings):
     # ── Blend Records column IDs (source board for press actuals) ────────
     col_blend_status: str = "color_mm1mb9cm"  # "Blend Status" — flips to "Pressing" → actual_start
 
+    # ── Source-board → engine mapping (E5) ───────────────────────────────
+    # When Blend Status flips to this label on Blend Records, the engine
+    # writes actual_start + Status=Running on the matching Schedule slot
+    # (the one whose stage_id matches `blend_status_pressing_stage_id`).
+    # Phase 1: single tablet-press-standard recipe with one "press" stage.
+    blend_status_pressing_label: str = "Pressing"
+    blend_status_pressing_stage_id: str = "press"
+
     # ── Timezone ─────────────────────────────────────────────────────────
     factory_tz: str = "America/Denver"
 

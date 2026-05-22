@@ -19,13 +19,17 @@ from engine.io.worker import (
     submit_event,
 )
 from engine.models import (
+    ActualStartReported,
     CapacityChanged,
     Machine,
     MachineStatus,
+    Priority,
     Recipe,
     RecipeStage,
     RecipeStatus,
     ScheduleNewOrder,
+    Slot,
+    SlotStatus,
     Snapshot,
 )
 
@@ -112,6 +116,71 @@ async def test_process_event_raises_on_apply_failure():
 
         with pytest.raises(RuntimeError, match="apply_plan failed"):
             await process_event(order)
+
+
+@pytest.mark.asyncio
+async def test_process_event_actual_start_applies_when_matching_slot():
+    """ActualStartReported with a matching Queued slot → apply_plan called."""
+    actual_at = datetime(2026, 5, 22, 10, 5, 0, tzinfo=TZ)
+    event = ActualStartReported(
+        job_reference_id="J1", stage_id="press", actual_at=actual_at,
+    )
+    # Snapshot with one matching Queued slot.
+    slot = Slot(
+        id="S1", name="N1 → Gandalf",
+        job_reference_id="J1", machine_id="12047953695",
+        stage_id="press",
+        recipe_key="tablet-press-standard", recipe_version=1,
+        quantity=100000,
+        planned_start=NOW, planned_end=NOW,
+        actual_start=None, actual_end=None,
+        dependent_on_ids=(), status=SlotStatus.QUEUED,
+        manually_placed=False, priority=Priority.NORMAL,
+        last_reflow_hash=None, drift_last_detected_at=None,
+    )
+    snap = _fake_snapshot()
+    snap_with_slot = Snapshot(
+        read_at=snap.read_at, machines=snap.machines,
+        recipes=snap.recipes, slots=(slot,),
+    )
+    fake_result = ApplyResult(
+        created_slot_ids=[], updated_slot_ids=["S1"], reflow_hash="h-actual",
+    )
+    with (
+        patch("engine.io.worker.read_snapshot", new_callable=AsyncMock) as mock_snap,
+        patch("engine.io.worker.apply_plan", new_callable=AsyncMock) as mock_apply,
+        patch("engine.io.worker.now_local", return_value=NOW),
+    ):
+        mock_snap.return_value = snap_with_slot
+        mock_apply.return_value = fake_result
+        result = await process_event(event)
+
+    assert result is fake_result
+    mock_apply.assert_awaited_once()
+    # The Plan passed to apply_plan should have one SlotWrite updating S1.
+    plan_arg = mock_apply.await_args.args[0]
+    assert len(plan_arg.slot_writes) == 1
+    w = plan_arg.slot_writes[0]
+    assert w.slot_id == "S1"
+    assert w.actual_start == actual_at
+    assert w.status == SlotStatus.RUNNING
+
+
+@pytest.mark.asyncio
+async def test_process_event_actual_start_noop_when_no_slot():
+    """ActualStartReported for an unscheduled job → no apply_plan call."""
+    event = ActualStartReported(
+        job_reference_id="J-not-scheduled", stage_id="press", actual_at=NOW,
+    )
+    with (
+        patch("engine.io.worker.read_snapshot", new_callable=AsyncMock) as mock_snap,
+        patch("engine.io.worker.apply_plan", new_callable=AsyncMock) as mock_apply,
+        patch("engine.io.worker.now_local", return_value=NOW),
+    ):
+        mock_snap.return_value = _fake_snapshot()  # zero slots
+        result = await process_event(event)
+    assert result is None
+    mock_apply.assert_not_awaited()
 
 
 @pytest.mark.asyncio
