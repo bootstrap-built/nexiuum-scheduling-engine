@@ -10,6 +10,8 @@ can be deployed and probed before real logic lands.
 
 from __future__ import annotations
 
+import logging
+import os
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
@@ -19,6 +21,15 @@ from engine.io.worker import start_worker, stop_worker
 from engine.routes.commit import router as commit_router
 from engine.routes.simulate import router as simulate_router
 from engine.routes.webhook import router as webhook_router
+
+# Configure application logging early so engine.* loggers emit at the
+# level configured in LOG_LEVEL (default INFO). Without this Python's root
+# logger stays at WARNING and our log.info() messages disappear, leaving
+# only uvicorn access logs in container output.
+logging.basicConfig(
+    level=os.environ.get("LOG_LEVEL", "INFO"),
+    format="%(asctime)s %(name)s %(levelname)s %(message)s",
+)
 
 
 @asynccontextmanager
