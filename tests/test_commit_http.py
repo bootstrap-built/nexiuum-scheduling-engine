@@ -10,7 +10,6 @@ import pytest
 from fastapi.testclient import TestClient
 
 from engine.io.apply import ApplyResult
-from engine.io.echo_guard import get_echo_guard
 from engine.main import app
 from engine.models import (
     Machine,
@@ -56,7 +55,6 @@ def client():
 
     TestClient handles the FastAPI lifespan (start/stop worker) automatically.
     """
-    get_echo_guard().clear()
     with (
         patch("engine.io.worker.read_snapshot", new_callable=AsyncMock) as mock_snap,
         patch("engine.io.worker.apply_plan", new_callable=AsyncMock) as mock_apply,

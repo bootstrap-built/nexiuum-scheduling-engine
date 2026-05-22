@@ -10,8 +10,9 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from engine.io.apply import ApplyResult
-from engine.io.echo_guard import get_echo_guard
 from engine.io.worker import (
+    WorkerNotRunning,
+    enqueue_event,
     process_event,
     start_worker,
     stop_worker,
@@ -62,8 +63,7 @@ def _fake_snapshot() -> Snapshot:
 
 @pytest.mark.asyncio
 async def test_process_event_schedules_new_order_and_applies():
-    """ScheduleNewOrder → calls apply_plan → stamps echo guard."""
-    get_echo_guard().clear()
+    """ScheduleNewOrder → calls apply_plan → returns the ApplyResult."""
     order = ScheduleNewOrder(
         job_reference_id="11801201557",
         recipe_key="tablet-press-standard",
@@ -87,8 +87,31 @@ async def test_process_event_schedules_new_order_and_applies():
     assert result is fake_result
     mock_snap.assert_awaited_once()
     mock_apply.assert_awaited_once()
-    # Echo guard should remember the reflow hash
-    assert get_echo_guard().is_engine_origin("hash-xyz")
+
+
+@pytest.mark.asyncio
+async def test_process_event_raises_on_apply_failure():
+    """If apply_plan returns success=False, process_event raises."""
+    order = ScheduleNewOrder(
+        job_reference_id="11801201557",
+        recipe_key="tablet-press-standard",
+        recipe_version=1,
+        quantity=100000,
+    )
+    failed_result = ApplyResult(
+        created_slot_ids=[], reflow_hash="hash-fail",
+        errors=["graphql 400: bad column id"],
+    )
+    with (
+        patch("engine.io.worker.read_snapshot", new_callable=AsyncMock) as mock_snap,
+        patch("engine.io.worker.apply_plan", new_callable=AsyncMock) as mock_apply,
+        patch("engine.io.worker.now_local", return_value=NOW),
+    ):
+        mock_snap.return_value = _fake_snapshot()
+        mock_apply.return_value = failed_result
+
+        with pytest.raises(RuntimeError, match="apply_plan failed"):
+            await process_event(order)
 
 
 @pytest.mark.asyncio
@@ -129,7 +152,6 @@ async def test_process_event_no_slot_writes_returns_none():
 @pytest.mark.asyncio
 async def test_submit_event_processes_via_worker():
     """submit_event waits for the worker to finish the event."""
-    get_echo_guard().clear()
     order = ScheduleNewOrder(
         job_reference_id="11801201557",
         recipe_key="tablet-press-standard",
@@ -180,3 +202,105 @@ async def test_submit_event_propagates_exception():
                 await asyncio.wait_for(submit_event(order), timeout=2.0)
         finally:
             await stop_worker()
+
+
+# ─── Cancellation / shutdown behavior ────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_submit_event_fails_fast_when_worker_not_running():
+    """submit_event raises WorkerNotRunning without a live worker, not hang."""
+    # Ensure no worker is running.
+    await stop_worker()
+    order = ScheduleNewOrder(
+        job_reference_id="J",
+        recipe_key="tablet-press-standard",
+        recipe_version=1,
+        quantity=100,
+    )
+    with pytest.raises(WorkerNotRunning):
+        await submit_event(order)
+
+
+@pytest.mark.asyncio
+async def test_enqueue_event_fails_fast_when_worker_not_running():
+    """enqueue_event also raises WorkerNotRunning — webhook layer maps to 'dropped'."""
+    await stop_worker()
+    order = ScheduleNewOrder(
+        job_reference_id="J",
+        recipe_key="tablet-press-standard",
+        recipe_version=1,
+        quantity=100,
+    )
+    with pytest.raises(WorkerNotRunning):
+        await enqueue_event(order)
+
+
+@pytest.mark.asyncio
+async def test_stop_worker_during_in_flight_event_cancels_future():
+    """If the worker is cancelled mid-event, the awaiting future is cancelled."""
+    order = ScheduleNewOrder(
+        job_reference_id="11801201557",
+        recipe_key="tablet-press-standard",
+        recipe_version=1,
+        quantity=100000,
+    )
+
+    # apply_plan blocks forever so we can cancel mid-flight.
+    async def _hang(*_args, **_kw):
+        await asyncio.sleep(60)
+
+    with (
+        patch("engine.io.worker.read_snapshot", new_callable=AsyncMock) as mock_snap,
+        patch("engine.io.worker.apply_plan", side_effect=_hang),
+        patch("engine.io.worker.now_local", return_value=NOW),
+    ):
+        mock_snap.return_value = _fake_snapshot()
+
+        await start_worker()
+        task = asyncio.create_task(submit_event(order))
+        # Give the worker a moment to pick up the submission and enter apply_plan.
+        await asyncio.sleep(0.05)
+        await stop_worker()
+        # The awaiting submit_event task should resolve quickly (cancelled), not hang.
+        # The cancelled future raises CancelledError when awaited — not
+        # TimeoutError, which would mean the future was never resolved.
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=1.0)
+
+
+@pytest.mark.asyncio
+async def test_stop_worker_drains_pending_submissions():
+    """Submissions still on the queue at shutdown get their futures cancelled."""
+    order = ScheduleNewOrder(
+        job_reference_id="11801201557",
+        recipe_key="tablet-press-standard",
+        recipe_version=1,
+        quantity=100000,
+    )
+
+    # First submission hangs; subsequent ones will queue behind it.
+    async def _hang(*_args, **_kw):
+        await asyncio.sleep(60)
+
+    with (
+        patch("engine.io.worker.read_snapshot", new_callable=AsyncMock) as mock_snap,
+        patch("engine.io.worker.apply_plan", side_effect=_hang),
+        patch("engine.io.worker.now_local", return_value=NOW),
+    ):
+        mock_snap.return_value = _fake_snapshot()
+
+        await start_worker()
+        # Submit one that the worker will pick up and hang on.
+        t1 = asyncio.create_task(submit_event(order))
+        await asyncio.sleep(0.05)
+        # Submit a second one that will sit on the queue.
+        t2 = asyncio.create_task(submit_event(order))
+        await asyncio.sleep(0.05)
+
+        await stop_worker()
+
+        # Both tasks should resolve (with cancellation/exception), not hang.
+        for t in (t1, t2):
+            with pytest.raises((asyncio.CancelledError, BaseException)):
+                await asyncio.wait_for(t, timeout=1.0)

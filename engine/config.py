@@ -92,6 +92,30 @@ class Settings(BaseSettings):
     port: int = 8002
     log_level: str = "INFO"
 
+    # ── Webhook auth ─────────────────────────────────────────────────────
+    # Phase 1: shared secret embedded in the webhook URL path
+    # (POST /webhook/monday/<secret>). Monday's `create_webhook` mutation
+    # produces webhooks that are NOT JWT-signed — JWT signing only applies
+    # to Monday Apps Framework integration recipes. So we use a URL-path
+    # secret as the primary auth. Generate with: `openssl rand -hex 32`.
+    # TODO: when we migrate to Monday Apps Framework, replace with JWT
+    # verification via the app Signing Secret.
+    monday_webhook_secret: str = Field(
+        "", alias="MONDAY_WEBHOOK_SECRET",
+        description="Shared secret embedded in the Monday webhook URL path",
+    )
+
+    # ── Engine identity (for echo filtering) ─────────────────────────────
+    # Monday webhook payloads include `userId` — the user that triggered
+    # the change. All engine writes go through MONDAY_GRAYSPACE_TOKEN
+    # (bound to a service user, e.g. "Gray Space Force"), so we filter
+    # echoes by matching webhook.userId against the engine's user id.
+    # If left blank, detected at startup via `{ me { id } }`.
+    engine_monday_user_id: str = Field(
+        "", alias="ENGINE_MONDAY_USER_ID",
+        description="Monday user id the engine writes as. Auto-detected at startup if blank.",
+    )
+
     # ── Monitoring (optional) ────────────────────────────────────────────
     sentry_dsn: str = ""
 

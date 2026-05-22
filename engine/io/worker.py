@@ -3,7 +3,7 @@
 One worker coroutine, one queue. All write paths (commit endpoint,
 webhook intake, polling sweep) enqueue events here. The worker drains
 the queue serially, runs the appropriate handler against a fresh
-snapshot, applies the resulting Plan, and stamps the echo guard.
+snapshot, and applies the resulting Plan.
 
 Read paths (`/simulate`, `/health`) bypass the worker — they read fresh
 state on every request without contending with writes.
@@ -11,6 +11,11 @@ state on every request without contending with writes.
 Per v3 plan: this is the concurrency model decision. Single async worker
 keeps the engine simple and deterministic at Phase 1 scale. If queue
 depth ever exceeds ~10 the worker should be sharded by machine.
+
+Two submission paths:
+- `submit_event(event)` — awaits processing, returns result (used by /commit).
+- `enqueue_event(event)` — fire-and-forget, returns immediately (used by
+  webhooks, where slow processing would cause Monday to retry the webhook).
 """
 
 from __future__ import annotations
@@ -23,7 +28,6 @@ from engine.config import get_settings
 from engine.core.scheduler import plan_for_new_order
 from engine.core.timezone import now_local
 from engine.io.apply import ApplyResult, apply_plan
-from engine.io.echo_guard import get_echo_guard
 from engine.io.snapshot import read_snapshot
 from engine.models import (
     ActualEndReported,
@@ -46,7 +50,11 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class _Submission:
-    """One event enqueued for processing, with a future the caller can await."""
+    """One event enqueued for processing.
+
+    `future` resolves with the ApplyResult (or exception) when processing
+    completes. Fire-and-forget callers (webhooks) simply don't await it.
+    """
 
     event: Event
     future: asyncio.Future[ApplyResult | None]
@@ -62,6 +70,11 @@ def get_queue() -> asyncio.Queue[_Submission]:
     if _queue is None:
         _queue = asyncio.Queue()
     return _queue
+
+
+def is_worker_alive() -> bool:
+    """True if a worker task is running and hasn't crashed."""
+    return _worker_task is not None and not _worker_task.done()
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -85,7 +98,12 @@ async def process_event(event: Event) -> ApplyResult | None:
         if not plan.slot_writes:
             return None
         result = await apply_plan(plan)
-        get_echo_guard().remember(result.reflow_hash)
+        if not result.success:
+            log.error(
+                "apply_plan failed: errors=%s reflow_hash=%s",
+                result.errors, result.reflow_hash,
+            )
+            raise RuntimeError(f"apply_plan failed: {result.errors}")
         log.info(
             "ScheduleNewOrder applied: created=%s reflow_hash=%s",
             result.created_slot_ids, result.reflow_hash,
@@ -114,19 +132,31 @@ async def process_event(event: Event) -> ApplyResult | None:
 
 
 async def worker_loop() -> None:
-    """Drain the event queue forever. One event at a time, serialized."""
+    """Drain the event queue forever. One event at a time, serialized.
+
+    Cancellation contract: if the worker is cancelled mid-event, the
+    active submission's future is cancelled (so awaiting callers don't
+    hang) before re-raising CancelledError. `stop_worker()` then drains
+    any remaining queued submissions.
+    """
     queue = get_queue()
     log.info("worker_loop started")
     while True:
         submission = await queue.get()
         try:
-            result = await process_event(submission.event)
-            if not submission.future.done():
-                submission.future.set_result(result)
-        except Exception as exc:
-            log.exception("worker failed processing event %r", submission.event)
-            if not submission.future.done():
-                submission.future.set_exception(exc)
+            try:
+                result = await process_event(submission.event)
+            except asyncio.CancelledError:
+                if not submission.future.done():
+                    submission.future.cancel()
+                raise
+            except Exception as exc:
+                log.exception("worker failed processing event %r", submission.event)
+                if not submission.future.done():
+                    submission.future.set_exception(exc)
+            else:
+                if not submission.future.done():
+                    submission.future.set_result(result)
         finally:
             queue.task_done()
 
@@ -136,11 +166,38 @@ async def worker_loop() -> None:
 # ─────────────────────────────────────────────────────────────────────────
 
 
+class WorkerNotRunning(RuntimeError):
+    """Raised when submit_event / enqueue_event is called with no live worker."""
+
+
 async def submit_event(event: Event) -> ApplyResult | None:
-    """Submit an event to the worker; await processing; return the result."""
+    """Submit an event to the worker; await processing; return the result.
+
+    Used by /commit, which needs the created slot ids in its response.
+    Raises WorkerNotRunning if the worker isn't alive — fail fast rather
+    than awaiting a future that no one will resolve.
+    """
+    if not is_worker_alive():
+        raise WorkerNotRunning("worker task is not running")
     submission = _Submission(event=event, future=asyncio.get_running_loop().create_future())
     await get_queue().put(submission)
     return await submission.future
+
+
+async def enqueue_event(event: Event) -> None:
+    """Drop an event on the queue without waiting for processing.
+
+    Used by webhooks: Monday retries slow webhooks, so we must return
+    200 immediately. The worker processes async; results are not
+    surfaced to the webhook caller. Raises WorkerNotRunning if no live
+    worker.
+    """
+    if not is_worker_alive():
+        raise WorkerNotRunning("worker task is not running")
+    loop = asyncio.get_running_loop()
+    submission = _Submission(event=event, future=loop.create_future())
+    await get_queue().put(submission)
+    # Intentionally do not await submission.future.
 
 
 async def start_worker() -> asyncio.Task[None]:
@@ -153,13 +210,43 @@ async def start_worker() -> asyncio.Task[None]:
 
 
 async def stop_worker() -> None:
-    """Cancel the worker task and wait for shutdown. Call at app shutdown."""
+    """Cancel the worker task and drain pending submissions.
+
+    Any submissions still in the queue when shutdown begins have their
+    futures cancelled so callers don't hang forever.
+    """
     global _worker_task
     if _worker_task is None or _worker_task.done():
+        _worker_task = None
         return
     _worker_task.cancel()
     try:
         await _worker_task
     except asyncio.CancelledError:
         pass
+    _worker_task = None
+    # Drain any submissions still on the queue.
+    queue = get_queue()
+    drained = 0
+    while not queue.empty():
+        try:
+            sub = queue.get_nowait()
+        except asyncio.QueueEmpty:
+            break
+        if not sub.future.done():
+            sub.future.cancel()
+        queue.task_done()
+        drained += 1
+    if drained:
+        log.info("stop_worker drained %d pending submissions", drained)
+
+
+def reset_state_for_tests() -> None:
+    """Test helper — wipe module-level singletons.
+
+    asyncio.Queue is loop-bound; tests that span multiple event loops
+    need to discard the queue between runs. Call this from a fixture.
+    """
+    global _queue, _worker_task
+    _queue = None
     _worker_task = None
