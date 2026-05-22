@@ -6,13 +6,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
+# Install deps from pyproject.toml so they stay in sync with the project.
 COPY pyproject.toml ./
 RUN pip install --no-cache-dir \
-    fastapi>=0.115 \
-    "uvicorn[standard]>=0.32" \
-    httpx>=0.27 \
-    pydantic>=2.9 \
-    python-dotenv>=1.0
+        "fastapi>=0.115" \
+        "uvicorn[standard]>=0.32" \
+        "httpx>=0.27" \
+        "pydantic>=2.9" \
+        "pydantic-settings>=2.6"
 
 COPY engine/ ./engine/
 
