@@ -287,23 +287,79 @@ async def apply_plan(
 
     async def _run(c: MondayClient) -> ApplyResult:
         try:
-            data = await c.query(mutation, variables=variables)
+            data, gql_errors = await c.query_collecting_errors(mutation, variables=variables)
         except Exception as e:
-            log.exception("apply_plan failed")
-            return ApplyResult(reflow_hash=rh, errors=[f"GraphQL error: {e}"])
+            log.exception("apply_plan transport failure")
+            return ApplyResult(reflow_hash=rh, errors=[f"GraphQL transport error: {e}"])
+
+        # Index GraphQL errors by the alias they apply to. Monday returns a
+        # `path` array; the first element is the alias for aliased mutations.
+        errors_by_alias: dict[str, list[str]] = {}
+        unrouted_errors: list[str] = []  # errors with no parseable alias path
+        for err in gql_errors:
+            msg = err.get("message", "Monday returned an unspecified error")
+            path = err.get("path") or []
+            if path and isinstance(path[0], str):
+                errors_by_alias.setdefault(path[0], []).append(msg)
+            else:
+                unrouted_errors.append(msg)
 
         created: list[str] = []
         updated: list[str] = []
+        errors: list[str] = []
         for idx, alias in aliases:
             payload = data.get(alias)
-            if not payload or "id" not in payload:
-                continue
-            slot_id = str(payload["id"])
-            if plan.slot_writes[idx].slot_id is None:
-                created.append(slot_id)
+            alias_errors = errors_by_alias.get(alias) or []
+            write = plan.slot_writes[idx]
+            if payload and "id" in payload:
+                slot_id = str(payload["id"])
+                if write.slot_id is None:
+                    created.append(slot_id)
+                else:
+                    updated.append(slot_id)
+                # Defensive: Monday could theoretically return both an id and
+                # an error for the same alias. Surface that so it's visible.
+                if alias_errors:
+                    errors.append(
+                        f"slot index {idx} (alias {alias}) wrote id={slot_id} "
+                        f"but Monday also returned errors: {'; '.join(alias_errors)}"
+                    )
             else:
-                updated.append(slot_id)
-        return ApplyResult(created_slot_ids=created, updated_slot_ids=updated, reflow_hash=rh)
+                # Missing or null payload — this write did not land in Monday.
+                # Per Monday's batched-mutation semantics, earlier aliases in
+                # the same query may have already succeeded; their reflow_hash
+                # is already stamped. No rollback — operator reconciles.
+                target = (
+                    f"create (job={write.job_reference_id})"
+                    if write.slot_id is None
+                    else f"update slot_id={write.slot_id}"
+                )
+                detail = "; ".join(alias_errors) if alias_errors else (
+                    "no id returned and no per-alias error from Monday"
+                )
+                errors.append(
+                    f"slot index {idx} (alias {alias}) {target} failed: {detail}"
+                )
+
+        # Top-level errors with no alias path apply to the whole batch.
+        for msg in unrouted_errors:
+            errors.append(f"batch-level error: {msg}")
+
+        if errors:
+            log.error(
+                "apply_plan partial/full failure: "
+                "created=%d updated=%d failed=%d reflow_hash=%s",
+                len(created), len(updated),
+                len(aliases) - len(created) - len(updated),
+                rh,
+            )
+
+        return ApplyResult(
+            created_slot_ids=created,
+            updated_slot_ids=updated,
+            reflow_hash=rh,
+            errors=errors,
+        )
 
     if client is not None:
         return await _run(client)

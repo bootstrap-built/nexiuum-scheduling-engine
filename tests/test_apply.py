@@ -188,7 +188,128 @@ def test_apply_plan_raises_on_machine_writes():
 
     plan = Plan(
         slot_writes=(),
-        machine_writes=(MachineWrite(machine_id="M1", last_job_ended_at=None),),
+        machine_writes=(MachineWrite(machine_id="12047953695", last_job_ended_at=None),),
     )
     with pytest.raises(NotImplementedError, match="machine_writes not yet implemented"):
         asyncio.run(apply_plan(plan))
+
+
+# ─── Partial-failure handling (Codex E4 review #5) ───────────────────────
+#
+# Monday's batched aliased mutations are NOT transactional — aliases execute
+# sequentially and some may succeed while others fail. apply_plan must
+# report both: keep the successful slot ids, but populate `errors` so the
+# worker raises and the operator can reconcile in Monday directly.
+
+
+@pytest.mark.asyncio
+async def test_apply_plan_partial_success_returns_both_successes_and_errors():
+    """First alias succeeds; second fails — result includes both."""
+    from unittest.mock import AsyncMock, patch
+    from engine.io.apply import apply_plan
+
+    plan = Plan(slot_writes=(
+        SlotWrite(slot_id=None, machine_id="12047953695", name="w0", quantity=100),
+        SlotWrite(slot_id=None, machine_id="12047930644", name="w1", quantity=200),
+    ))
+
+    fake_data = {"w0": {"id": "9001"}, "w1": None}
+    fake_errors = [
+        {"message": "BoardRelationValue not found", "path": ["w1"]},
+    ]
+
+    class _FakeClient:
+        async def query_collecting_errors(self, *a, **kw):
+            return fake_data, fake_errors
+
+    result = await apply_plan(plan, client=_FakeClient())
+    assert result.created_slot_ids == ["9001"]
+    assert result.updated_slot_ids == []
+    assert not result.success
+    assert any("alias w1" in e and "BoardRelationValue" in e for e in result.errors)
+
+
+@pytest.mark.asyncio
+async def test_apply_plan_full_failure_returns_errors_no_ids():
+    """All aliases fail — no created/updated, full error list."""
+    from engine.io.apply import apply_plan
+
+    plan = Plan(slot_writes=(
+        SlotWrite(slot_id="100", machine_id="12047953695"),
+        SlotWrite(slot_id="200", machine_id="12047930644"),
+    ))
+    fake_data = {"w0": None, "w1": None}
+    fake_errors = [
+        {"message": "complexity budget exceeded", "path": ["w0"]},
+        {"message": "complexity budget exceeded", "path": ["w1"]},
+    ]
+
+    class _FakeClient:
+        async def query_collecting_errors(self, *a, **kw):
+            return fake_data, fake_errors
+
+    result = await apply_plan(plan, client=_FakeClient())
+    assert result.created_slot_ids == []
+    assert result.updated_slot_ids == []
+    assert not result.success
+    assert len(result.errors) == 2
+    assert all("complexity budget" in e for e in result.errors)
+
+
+@pytest.mark.asyncio
+async def test_apply_plan_full_success_returns_clean_result():
+    """Every alias succeeds → no errors, both ids populated."""
+    from engine.io.apply import apply_plan
+
+    plan = Plan(slot_writes=(
+        SlotWrite(slot_id=None, machine_id="12047953695", name="w0"),
+        SlotWrite(slot_id="200", machine_id="12047930644"),
+    ))
+    fake_data = {"w0": {"id": "9001"}, "w1": {"id": "200"}}
+
+    class _FakeClient:
+        async def query_collecting_errors(self, *a, **kw):
+            return fake_data, []
+
+    result = await apply_plan(plan, client=_FakeClient())
+    assert result.created_slot_ids == ["9001"]
+    assert result.updated_slot_ids == ["200"]
+    assert result.success
+    assert result.errors == []
+
+
+@pytest.mark.asyncio
+async def test_apply_plan_top_level_error_without_path_surfaces_as_batch():
+    """A GraphQL error with no `path` (e.g. query parse error) is batch-level."""
+    from engine.io.apply import apply_plan
+
+    plan = Plan(slot_writes=(SlotWrite(slot_id="100", machine_id="12047953695"),))
+    fake_data: dict = {}
+    fake_errors = [{"message": "Parse error: unexpected EOF"}]
+
+    class _FakeClient:
+        async def query_collecting_errors(self, *a, **kw):
+            return fake_data, fake_errors
+
+    result = await apply_plan(plan, client=_FakeClient())
+    assert not result.success
+    assert any("batch-level error" in e for e in result.errors)
+    assert any("Parse error" in e for e in result.errors)
+
+
+@pytest.mark.asyncio
+async def test_apply_plan_transport_error_returned_as_error():
+    """httpx-style exceptions become a single GraphQL transport error in the result."""
+    from engine.io.apply import apply_plan
+
+    plan = Plan(slot_writes=(SlotWrite(slot_id="100", machine_id="12047953695"),))
+
+    class _BrokenClient:
+        async def query_collecting_errors(self, *a, **kw):
+            raise RuntimeError("connection refused")
+
+    result = await apply_plan(plan, client=_BrokenClient())
+    assert not result.success
+    assert len(result.errors) == 1
+    assert "transport error" in result.errors[0]
+    assert "connection refused" in result.errors[0]

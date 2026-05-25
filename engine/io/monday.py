@@ -116,6 +116,34 @@ class MondayClient:
                 log.debug("Monday complexity: %s", complexity)
         return data
 
+    async def query_collecting_errors(
+        self,
+        query: str,
+        variables: dict[str, Any] | None = None,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        """Like `query`, but returns (data, errors) instead of raising on errors.
+
+        Used for batched aliased mutations where Monday may partially succeed:
+        some aliases return rows in `data`, others are nulled with corresponding
+        entries in `errors` (each with a `path` indicating the failed alias).
+        Callers reconcile per-alias themselves.
+
+        Transport errors still raise (httpx.HTTPError, status_code != 2xx).
+        If `data` is missing entirely (top-level query parse failure), returns
+        ({}, errors) — caller must treat that as full failure.
+        """
+        if self._http is None:
+            raise RuntimeError("MondayClient must be used as an async context manager")
+        body: dict[str, Any] = {"query": query}
+        if variables:
+            body["variables"] = variables
+        resp = await self._http.post(MONDAY_API_URL, json=body)
+        resp.raise_for_status()
+        payload = resp.json()
+        data = payload.get("data") or {}
+        errors = payload.get("errors") or []
+        return data, errors
+
     # ── High-level board reads ──────────────────────────────────────────
 
     async def fetch_board_items(
