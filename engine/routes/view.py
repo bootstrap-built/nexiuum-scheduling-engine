@@ -19,6 +19,8 @@ from typing import Any
 from fastapi import APIRouter
 from fastapi.responses import HTMLResponse
 
+from engine.config import get_settings
+from engine.io.monday import MondayClient, gray_space_client
 from engine.io.snapshot import read_snapshot
 from engine.models import Machine, Slot, Snapshot
 
@@ -67,19 +69,84 @@ def _slot_to_dict(s: Slot) -> dict[str, Any]:
     }
 
 
-def _snapshot_to_dict(snap: Snapshot) -> dict[str, Any]:
+def _snapshot_to_dict(snap: Snapshot, enrich: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    """Serialize the snapshot, merging per-job enrichment into each slot.
+
+    `enrich` is keyed by job_reference_id and contains display fields
+    (job_label / job_client / job_active) the engine doesn't otherwise track.
+    """
+    slot_dicts = []
+    for s in snap.slots:
+        d = _slot_to_dict(s)
+        meta = enrich.get(s.job_reference_id or "", {})
+        d["job_label"] = meta.get("job_label")
+        d["job_name"] = meta.get("job_name")
+        d["job_client"] = meta.get("job_client")
+        d["job_active"] = meta.get("job_active")
+        slot_dicts.append(d)
     return {
         "read_at": _iso(snap.read_at),
         "machines": [_machine_to_dict(m) for m in snap.machines],
-        "slots": [_slot_to_dict(s) for s in snap.slots],
+        "slots": slot_dicts,
     }
+
+
+async def _fetch_blend_enrichment(
+    job_ids: set[str],
+    client: MondayClient | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Fetch display-only Blend Records columns for the given job ids.
+
+    Returns a dict keyed by Monday item id with `job_label` (PO Number /
+    "N#"), `job_name` (the item's display name), `job_client`, `job_active`.
+    Missing or unset columns become None. Empty input → empty dict (no
+    Monday call).
+
+    One batched GraphQL query per /schedule.json hit. Could be cached later
+    if poll volume grows, but at 30s renderer cadence this is cheap.
+    """
+    job_ids = {jid for jid in job_ids if jid}
+    if not job_ids:
+        return {}
+    s = get_settings()
+    col_ids = [s.col_blend_po_number, s.col_blend_client, s.col_blend_active_ingredient]
+    query = """
+    query ($ids: [ID!], $cols: [String!]) {
+      items(ids: $ids) {
+        id
+        name
+        column_values(ids: $cols) { id text }
+      }
+    }
+    """
+    variables = {"ids": list(job_ids), "cols": col_ids}
+
+    async def _run(c: MondayClient) -> dict[str, dict[str, Any]]:
+        data = await c.query(query, variables=variables)
+        out: dict[str, dict[str, Any]] = {}
+        for item in data.get("items") or []:
+            cols = {cv["id"]: (cv.get("text") or None) for cv in item.get("column_values") or []}
+            out[str(item["id"])] = {
+                "job_label": cols.get(s.col_blend_po_number),
+                "job_name": item.get("name"),
+                "job_client": cols.get(s.col_blend_client),
+                "job_active": cols.get(s.col_blend_active_ingredient),
+            }
+        return out
+
+    if client is not None:
+        return await _run(client)
+    async with gray_space_client() as c:
+        return await _run(c)
 
 
 @router.get("/schedule.json")
 async def schedule_json() -> dict[str, Any]:
-    """Fresh Snapshot serialized to JSON for the view to render."""
+    """Fresh Snapshot + per-job display metadata, serialized for the view."""
     snap = await read_snapshot()
-    return _snapshot_to_dict(snap)
+    job_ids = {s.job_reference_id for s in snap.slots if s.job_reference_id}
+    enrich = await _fetch_blend_enrichment(job_ids)
+    return _snapshot_to_dict(snap, enrich)
 
 
 @router.get("/view", response_class=HTMLResponse)
@@ -180,12 +247,23 @@ _MAREY_HTML = r"""<!doctype html>
   footer .right{margin-left:auto;color:var(--txt-faint)}
   #tip{position:fixed;pointer-events:none;z-index:30;opacity:0;transition:opacity .12s;
     background:#0a0c10;border:1px solid var(--grid-strong);border-radius:9px;
-    padding:11px 13px;min-width:210px;max-width:320px;box-shadow:0 12px 34px rgba(0,0,0,.55)}
+    padding:11px 13px;min-width:230px;max-width:340px;box-shadow:0 12px 34px rgba(0,0,0,.55)}
+  #tip.pinned{pointer-events:auto;border-color:var(--press);
+    box-shadow:0 12px 34px rgba(0,0,0,.7),0 0 0 1px var(--press) inset}
   #tip h4{font-size:13px;font-weight:600;margin-bottom:7px;display:flex;align-items:center;gap:8px}
   #tip h4 .sw{width:9px;height:9px;border-radius:2px;flex:0 0 auto}
+  #tip h4 .ttl{flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  #tip .close{position:absolute;top:6px;right:8px;width:22px;height:22px;border:0;
+    background:transparent;color:var(--txt-faint);cursor:pointer;font-size:18px;
+    line-height:1;border-radius:4px;display:none}
+  #tip.pinned .close{display:block}
+  #tip .close:hover{color:var(--txt);background:var(--rail)}
+  #tip .sub{font-size:11.5px;color:var(--txt-dim);margin:-2px 0 8px;
+    font-family:var(--mono);letter-spacing:.02em}
   #tip .r{display:flex;justify-content:space-between;gap:22px;font-size:11.5px;
     padding:2px 0;color:var(--txt-dim)}
-  #tip .r b{color:var(--txt);font-weight:500;font-family:var(--mono)}
+  #tip .r b{color:var(--txt);font-weight:500;font-family:var(--mono);text-align:right}
+  #tip .sep{height:1px;background:var(--line);margin:7px -3px}
   #tip .tag{font-size:10px;font-family:var(--mono);padding:2px 7px;border-radius:4px;
     letter-spacing:.04em;display:inline-block}
   .tag.queued{background:var(--rail);color:var(--txt-dim)}
@@ -246,7 +324,7 @@ const JOB_COLORS = ['var(--j1)','var(--j2)','var(--j3)','var(--j4)','var(--j5)',
 let state = {
   snap: null,
   zoomHours: 24,
-  hoverSlotId: null,
+  pinnedSlotId: null,  // if set, the popout stays open across re-renders
 };
 
 // — grouping —
@@ -480,22 +558,36 @@ function render() {
       g.appendChild(drift);
     }
 
-    // Slot label if wide enough
+    // Bar label: N# (PO Number) is the human identifier. Fall back to the
+    // last 6 digits of the pulse id when the seed item hasn't been enriched.
     if (w > 60) {
       const t = document.createElementNS(ns, 'text');
       t.setAttribute('x', bx0 + 8); t.setAttribute('y', ly + 4);
       t.setAttribute('fill', '#0a0c10'); t.setAttribute('font-size', 11);
       t.setAttribute('font-weight', 600);
       t.setAttribute('pointer-events', 'none');
-      const lbl = s.job_reference_id ? '#' + s.job_reference_id.slice(-6) : s.name.slice(0, 18);
-      t.textContent = lbl + ' · ' + (s.quantity ? s.quantity.toLocaleString() : '');
+      const id = s.job_label || (s.job_reference_id ? '#' + s.job_reference_id.slice(-6) : s.name.slice(0, 18));
+      t.textContent = id + ' · ' + (s.quantity ? s.quantity.toLocaleString() : '');
       g.appendChild(t);
     }
 
-    g.addEventListener('mouseenter', e => showTip(s, e, color));
-    g.addEventListener('mousemove', e => moveTip(e));
-    g.addEventListener('mouseleave', hideTip);
+    g.addEventListener('mouseenter', e => { if (!state.pinnedSlotId) showTip(s, e, color, false); });
+    g.addEventListener('mousemove', e => { if (!state.pinnedSlotId) moveTip(e); });
+    g.addEventListener('mouseleave', () => { if (!state.pinnedSlotId) hideTip(); });
+    g.addEventListener('click', e => { e.stopPropagation(); pinTip(s, e, color); });
     svg.appendChild(g);
+  }
+
+  // If a popout was pinned before this re-render (e.g., 30s poll fired),
+  // re-attach it to the same slot in the new snapshot so it doesn't vanish.
+  if (state.pinnedSlotId) {
+    const slot = snap.slots.find(s => s.id === state.pinnedSlotId);
+    if (slot) {
+      const color = hashColor(slot.job_reference_id || slot.id);
+      renderTip(slot, color, true);  // keep current position
+    } else {
+      unpinTip();
+    }
   }
 
   // Empty-state indicator
@@ -507,34 +599,88 @@ function render() {
   m.textContent = `${mc} machines · ${sc} slot${sc === 1 ? '' : 's'} · snapshot ${snap.read_at ? new Date(snap.read_at).toLocaleString('en-US',{hour:'numeric',minute:'2-digit',second:'2-digit'}) : '—'}`;
 }
 
-function showTip(s, e, color) {
+// Render the popout content for `s`. `keepPosition` skips repositioning
+// (used during background refresh when the popout is already pinned).
+function renderTip(s, color, keepPosition) {
   const tip = document.getElementById('tip');
   const ps = s.actual_start || s.planned_start;
   const pe = s.actual_end || s.planned_end;
   const status = (s.status || '').toLowerCase();
   const driftTag = s.drift_last_detected_at ? '<span class="tag drift">DRIFT</span>' : '';
+  // Title prefers the N# (job_label); name + client read as the subline.
+  const title = s.job_label || (s.job_reference_id ? '#' + s.job_reference_id.slice(-6) : s.name || 'Slot ' + s.id);
+  const subParts = [];
+  if (s.job_name) subParts.push(s.job_name);
+  if (s.job_client && (!s.job_name || !s.job_name.includes(s.job_client))) subParts.push(s.job_client);
+  const subline = subParts.length ? `<div class="sub">${subParts.join(' · ')}</div>` : '';
   tip.innerHTML = `
-    <h4><span class="sw" style="background:${color}"></span>${s.name || 'Slot ' + s.id}
+    <button class="close" aria-label="Close" title="Close (esc)">&times;</button>
+    <h4><span class="sw" style="background:${color}"></span><span class="ttl">${title}</span>
       <span class="tag ${status}">${(s.status||'').toUpperCase()}</span>${driftTag}</h4>
-    <div class="r"><span>job</span><b>${s.job_reference_id || '—'}</b></div>
+    ${subline}
+    ${s.job_active ? `<div class="r"><span>active</span><b>${s.job_active}</b></div>` : ''}
     <div class="r"><span>recipe</span><b>${s.recipe_key || '—'}${s.recipe_version ? ' v' + s.recipe_version : ''}</b></div>
     <div class="r"><span>quantity</span><b>${s.quantity ? s.quantity.toLocaleString() : '—'}</b></div>
+    <div class="sep"></div>
     <div class="r"><span>planned start</span><b>${ps ? fmtTime(new Date(ps)) : '—'}</b></div>
     <div class="r"><span>planned end</span><b>${pe ? fmtTime(new Date(pe)) : '—'}</b></div>
     ${s.actual_start ? `<div class="r"><span>actual start</span><b>${fmtTime(new Date(s.actual_start))}</b></div>` : ''}
     ${s.actual_end ? `<div class="r"><span>actual end</span><b>${fmtTime(new Date(s.actual_end))}</b></div>` : ''}
     ${s.drift_last_detected_at ? `<div class="r"><span>drift detected</span><b>${fmtTime(new Date(s.drift_last_detected_at))}</b></div>` : ''}
+    <div class="sep"></div>
+    <div class="r"><span>pulse id</span><b>${s.job_reference_id || '—'}</b></div>
+    <div class="r"><span>slot id</span><b>${s.id}</b></div>
   `;
   tip.style.opacity = 1;
-  moveTip(e);
+  // Wire up the close button each render — innerHTML rewrote the node.
+  const close = tip.querySelector('.close');
+  if (close) close.addEventListener('click', unpinTip);
+  if (!keepPosition) {
+    // Centered on screen as a fallback; pinTip() repositions to the click.
+    tip.style.left = ((window.innerWidth - tip.offsetWidth) / 2) + 'px';
+    tip.style.top = '120px';
+  }
 }
+
+function showTip(s, e, color, pinned) {
+  renderTip(s, color, false);
+  const tip = document.getElementById('tip');
+  if (pinned) tip.classList.add('pinned');
+  else tip.classList.remove('pinned');
+  if (e) moveTip(e);
+}
+
 function moveTip(e) {
   const tip = document.getElementById('tip');
   const x = Math.min(window.innerWidth - tip.offsetWidth - 14, e.clientX + 14);
   const y = Math.min(window.innerHeight - tip.offsetHeight - 14, e.clientY + 14);
   tip.style.left = x + 'px'; tip.style.top = y + 'px';
 }
-function hideTip() { document.getElementById('tip').style.opacity = 0; }
+
+function hideTip() {
+  if (state.pinnedSlotId) return;
+  document.getElementById('tip').style.opacity = 0;
+}
+
+function pinTip(s, e, color) {
+  state.pinnedSlotId = s.id;
+  showTip(s, e, color, true);
+}
+
+function unpinTip() {
+  state.pinnedSlotId = null;
+  const tip = document.getElementById('tip');
+  tip.classList.remove('pinned');
+  tip.style.opacity = 0;
+}
+
+// Click anywhere outside the chart / popout dismisses the pin.
+document.addEventListener('click', e => {
+  if (!state.pinnedSlotId) return;
+  const tip = document.getElementById('tip');
+  if (!tip.contains(e.target)) unpinTip();
+});
+document.addEventListener('keydown', e => { if (e.key === 'Escape') unpinTip(); });
 
 // Zoom controls
 document.querySelectorAll('#zoom button').forEach(b => {

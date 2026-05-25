@@ -79,6 +79,12 @@ class Settings(BaseSettings):
 
     # ── Blend Records column IDs (source board for press actuals) ────────
     col_blend_status: str = "color_mm1mb9cm"  # "Blend Status" — flips to "Pressing" → actual_start
+    # Display-only columns enriched into /schedule.json so the Marey view can
+    # show human-meaningful labels (N# instead of pulse id, client + active
+    # ingredient in the click popout). Not read by the pure-core scheduler.
+    col_blend_po_number: str = "text_mm1mpz7p"  # "PO Number" — the N#
+    col_blend_client: str = "text_mm1mw6j9"  # "Client"
+    col_blend_active_ingredient: str = "text_mm1m9f2e"  # "Active Ingredient"
 
     # ── Source-board → engine mapping (E5) ───────────────────────────────
     # When Blend Status flips to this label on Blend Records, the engine

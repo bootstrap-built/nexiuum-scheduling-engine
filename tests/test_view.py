@@ -56,8 +56,10 @@ def _snap(machines, slots) -> Snapshot:
 def test_schedule_json_serializes_empty_snapshot():
     """No slots, machine list still surfaces."""
     snap = _snap([_machine("M1", "Gandalf")], [])
-    with patch("engine.routes.view.read_snapshot", new_callable=AsyncMock) as m:
+    with patch("engine.routes.view.read_snapshot", new_callable=AsyncMock) as m, \
+         patch("engine.routes.view._fetch_blend_enrichment", new_callable=AsyncMock) as fe:
         m.return_value = snap
+        fe.return_value = {}
         with TestClient(app) as c:
             r = c.get("/schedule.json")
     assert r.status_code == 200
@@ -77,8 +79,10 @@ def test_schedule_json_includes_drift_and_status():
             _slot("S2", "M1", status=SlotStatus.QUEUED, drift=NOW),
         ],
     )
-    with patch("engine.routes.view.read_snapshot", new_callable=AsyncMock) as m:
+    with patch("engine.routes.view.read_snapshot", new_callable=AsyncMock) as m, \
+         patch("engine.routes.view._fetch_blend_enrichment", new_callable=AsyncMock) as fe:
         m.return_value = snap
+        fe.return_value = {}
         with TestClient(app) as c:
             r = c.get("/schedule.json")
     data = r.json()
@@ -87,6 +91,49 @@ def test_schedule_json_includes_drift_and_status():
     assert by_id["S1"]["drift_last_detected_at"] is None
     assert by_id["S2"]["status"] == "Queued"
     assert by_id["S2"]["drift_last_detected_at"].startswith("2026-05-24T23:00:00")
+
+
+def test_schedule_json_merges_blend_enrichment():
+    """job_label / job_name / job_client / job_active land on each slot,
+    keyed by job_reference_id. Slots without matching enrichment get nulls
+    rather than being dropped."""
+    snap = _snap(
+        [_machine("M1", "Gandalf")],
+        [
+            _slot("S1", "M1"),          # job_reference_id = "11801201557"
+            Slot(
+                id="S2", name="orphan", job_reference_id="99999",
+                machine_id="M1", stage_id="press",
+                recipe_key="x", recipe_version=1, quantity=10,
+                planned_start=NOW, planned_end=NOW,
+                actual_start=None, actual_end=None,
+                dependent_on_ids=(), status=SlotStatus.QUEUED,
+                manually_placed=False, priority=Priority.NORMAL,
+                last_reflow_hash=None, drift_last_detected_at=None,
+            ),
+        ],
+    )
+    enrich = {
+        "11801201557": {
+            "job_label": "N3236",
+            "job_name": "N3236 - ROAR LLC",
+            "job_client": "ROAR LLC",
+            "job_active": "7OH 85mg",
+        },
+    }
+    with patch("engine.routes.view.read_snapshot", new_callable=AsyncMock) as m, \
+         patch("engine.routes.view._fetch_blend_enrichment", new_callable=AsyncMock) as fe:
+        m.return_value = snap
+        fe.return_value = enrich
+        with TestClient(app) as c:
+            r = c.get("/schedule.json")
+    by_id = {s["id"]: s for s in r.json()["slots"]}
+    assert by_id["S1"]["job_label"] == "N3236"
+    assert by_id["S1"]["job_client"] == "ROAR LLC"
+    assert by_id["S1"]["job_active"] == "7OH 85mg"
+    # Orphan slot: enrichment fields present but null
+    assert by_id["S2"]["job_label"] is None
+    assert by_id["S2"]["job_client"] is None
 
 
 def test_view_serves_html():
