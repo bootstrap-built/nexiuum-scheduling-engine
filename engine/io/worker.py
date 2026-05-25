@@ -26,6 +26,7 @@ from dataclasses import dataclass
 
 from engine.config import get_settings
 from engine.core.actuals import plan_for_actual_end, plan_for_actual_start
+from engine.core.drift import plan_for_drift
 from engine.core.scheduler import plan_for_new_order
 from engine.core.timezone import now_local
 from engine.io.apply import ApplyResult, apply_plan
@@ -63,6 +64,7 @@ class _Submission:
 
 _queue: asyncio.Queue[_Submission] | None = None
 _worker_task: asyncio.Task[None] | None = None
+_last_error: str | None = None  # most recent process_event exception, for /health
 
 
 def get_queue() -> asyncio.Queue[_Submission]:
@@ -76,6 +78,20 @@ def get_queue() -> asyncio.Queue[_Submission]:
 def is_worker_alive() -> bool:
     """True if a worker task is running and hasn't crashed."""
     return _worker_task is not None and not _worker_task.done()
+
+
+def queue_depth() -> int:
+    """Current queue depth — number of pending submissions waiting on the worker.
+
+    Returns 0 if the queue hasn't been created yet (no events ever submitted)."""
+    if _queue is None:
+        return 0
+    return _queue.qsize()
+
+
+def last_error() -> str | None:
+    """Most recent exception text from process_event. Cleared after a success."""
+    return _last_error
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -106,11 +122,19 @@ async def process_event(event: Event) -> ApplyResult | None:
         plan = plan_for_actual_end(snapshot, event)
         return await _apply_or_noop(plan, label="ActualEndReported")
 
-    # ── Stubs for handlers not yet implemented (E6+) ──
+    if isinstance(event, DriftDetected):
+        plan = plan_for_drift(
+            snapshot, event, now=now,
+            threshold_minutes=s.drift_threshold_minutes,
+            suppression_minutes=s.drift_suppression_minutes,
+        )
+        return await _apply_or_noop(plan, label=f"DriftDetected[{event.kind}]")
+
+    # ── Stubs for handlers not yet implemented ──
     if isinstance(event, CapacityChanged):
         log.info("CapacityChanged event for machine %s — reflow not yet implemented", event.machine_id)
         return None
-    if isinstance(event, (ManualReschedule, ExpediteRequested, DriftDetected)):
+    if isinstance(event, (ManualReschedule, ExpediteRequested)):
         log.info("Event %s — handler not yet implemented", type(event).__name__)
         return None
 
@@ -150,6 +174,7 @@ async def worker_loop() -> None:
     hang) before re-raising CancelledError. `stop_worker()` then drains
     any remaining queued submissions.
     """
+    global _last_error
     queue = get_queue()
     log.info("worker_loop started")
     while True:
@@ -163,9 +188,11 @@ async def worker_loop() -> None:
                 raise
             except Exception as exc:
                 log.exception("worker failed processing event %r", submission.event)
+                _last_error = f"{type(exc).__name__}: {exc}"
                 if not submission.future.done():
                     submission.future.set_exception(exc)
             else:
+                _last_error = None
                 if not submission.future.done():
                     submission.future.set_result(result)
         finally:
@@ -258,6 +285,7 @@ def reset_state_for_tests() -> None:
     asyncio.Queue is loop-bound; tests that span multiple event loops
     need to discard the queue between runs. Call this from a fixture.
     """
-    global _queue, _worker_task
+    global _queue, _worker_task, _last_error
     _queue = None
     _worker_task = None
+    _last_error = None

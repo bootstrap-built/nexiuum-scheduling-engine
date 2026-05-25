@@ -110,10 +110,19 @@ def test_simulate_post_returns_200_with_projected_dates(client):
 
 
 def test_simulate_post_health_route_still_works(client):
-    """Sanity — the new router didn't break /health."""
+    """Sanity — the new router didn't break /health.
+
+    Status may be 'degraded' here because this fixture's TestClient is not
+    used with `with TestClient(app) as c:`, so the lifespan never runs and
+    the worker + sweep tasks aren't started. We only assert the route is
+    wired and returns the structured shape.
+    """
     resp = client.get("/health")
     assert resp.status_code == 200
-    assert resp.json()["status"] == "ok"
+    body = resp.json()
+    assert body["status"] in {"ok", "degraded"}
+    assert "version" in body
+    assert "worker" in body and "sweep" in body
 
 
 # ─── Validation errors return 422 (Pydantic) ─────────────────────────────

@@ -10,12 +10,14 @@ Records item ID) — the simulation sentinel is rejected.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from engine.config import get_settings
 from engine.core.scheduler import (
     DanglingRecipeError,
     InactiveRecipeError,
@@ -28,11 +30,32 @@ from engine.routes.simulate import SimulateError
 router = APIRouter(tags=["commit"])
 
 
+# Recipe Key is a kebab-case identifier written by upstream Monday automation
+# (locked decision #2). Constraining the charset here catches accidental
+# whitespace, smart quotes, or unicode that the Monday columns would happily
+# accept but downstream scheduler joins would silently miss.
+_RECIPE_KEY_PATTERN = r"^[a-z0-9][a-z0-9_-]{0,63}$"
+
+
 class CommitRequest(BaseModel):
     job_reference_id: str = Field(
-        ..., min_length=1, description="Real Blend Records item ID; cannot be the simulate sentinel"
+        ...,
+        pattern=r"^\d+$",
+        min_length=1,
+        max_length=20,
+        description=(
+            "Real Blend Records item ID — must be a numeric string. "
+            "Rejects the '__simulate__' sentinel and any non-digit text "
+            "before the worker ever sees it."
+        ),
     )
-    recipe_key: str
+    recipe_key: str = Field(
+        ...,
+        pattern=_RECIPE_KEY_PATTERN,
+        min_length=1,
+        max_length=64,
+        description="Lower-case kebab-case identifier (e.g. 'tablet-press-standard')",
+    )
     recipe_version: int = Field(1, ge=1)
     quantity: int = Field(..., gt=0)
     dual_sided: bool = False
@@ -51,6 +74,9 @@ class CommitResponse(BaseModel):
 @router.post("/commit", response_model=CommitResponse, responses={400: {"model": SimulateError}})
 async def commit_route(req: CommitRequest) -> CommitResponse:
     """Schedule and write a real order through the worker queue."""
+    # Defence-in-depth: the numeric-string pattern on the field already
+    # rejects "__simulate__", but make the intent explicit and a future
+    # schema relaxation safe.
     if req.job_reference_id == "__simulate__":
         raise HTTPException(status_code=400, detail="job_reference_id must be a real item id")
 
@@ -64,8 +90,17 @@ async def commit_route(req: CommitRequest) -> CommitResponse:
         requested_ship_by=req.requested_ship_by,
     )
 
+    timeout = get_settings().commit_timeout_seconds
     try:
-        result = await submit_event(order)
+        result = await asyncio.wait_for(submit_event(order), timeout=timeout)
+    except asyncio.TimeoutError:
+        # Worker queue is wedged or Monday is too slow. Don't leave the
+        # HTTP connection hanging; let the caller retry. The submitted
+        # event remains in the queue and will run when the worker drains.
+        raise HTTPException(
+            status_code=504,
+            detail=f"engine worker did not respond within {timeout}s",
+        )
     except DanglingRecipeError as e:
         raise HTTPException(
             status_code=400,

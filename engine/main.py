@@ -17,6 +17,9 @@ from typing import AsyncIterator
 
 from fastapi import FastAPI
 
+from engine.io import sweep as sweep_module
+from engine.io import worker as worker_module
+from engine.io.sweep import start_sweep, stop_sweep
 from engine.io.worker import start_worker, stop_worker
 from engine.routes.commit import router as commit_router
 from engine.routes.simulate import router as simulate_router
@@ -34,11 +37,18 @@ logging.basicConfig(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Start the async worker on app startup; cancel on shutdown."""
+    """Start the async worker + polling sweep on startup; cancel on shutdown.
+
+    Order: worker before sweep (sweep enqueues into the worker — start it
+    second, stop it first so the worker is still draining when the last
+    sweep batch lands).
+    """
     await start_worker()
+    await start_sweep()
     try:
         yield
     finally:
+        await stop_sweep()
         await stop_worker()
 
 
@@ -55,11 +65,32 @@ app.include_router(webhook_router)
 
 
 @app.get("/health")
-async def health() -> dict[str, str]:
-    """Liveness probe."""
+async def health() -> dict[str, object]:
+    """Liveness + per-component health.
+
+    `status` is "ok" iff both the worker and sweep tasks are alive.
+    Per-component blocks include:
+      - alive: task running and not done
+      - last_error: most recent exception text (None if last run succeeded)
+      - queue_depth (worker only): pending submissions on the queue
+
+    Used by deploy smoke tests and (eventually) external monitoring.
+    """
+    worker_alive = worker_module.is_worker_alive()
+    sweep_alive = sweep_module.is_sweep_alive()
+    overall = "ok" if (worker_alive and sweep_alive) else "degraded"
     return {
-        "status": "ok",
+        "status": overall,
         "version": app.version,
+        "worker": {
+            "alive": worker_alive,
+            "queue_depth": worker_module.queue_depth(),
+            "last_error": worker_module.last_error(),
+        },
+        "sweep": {
+            "alive": sweep_alive,
+            "last_error": sweep_module.last_error(),
+        },
     }
 
 

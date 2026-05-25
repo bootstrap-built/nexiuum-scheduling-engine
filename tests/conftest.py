@@ -40,13 +40,38 @@ import pytest  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
-def _reset_engine_singletons():
-    """Clear module-level state before and after every test."""
-    from engine.io import engine_identity
-    from engine.io.worker import reset_state_for_tests
+async def _reset_engine_singletons():
+    """Clear module-level state before and after every test.
 
-    reset_state_for_tests()
+    Async so that any background tasks the test started (worker, sweep)
+    can be cleanly cancelled with `await stop_*` before the singleton
+    handle is dropped. A sync fixture that only nulled the handles would
+    leave the underlying asyncio.Task running until loop close, producing
+    pending-task warnings and cross-test interference.
+    """
+    from engine.config import reset_settings_for_tests as reset_settings
+    from engine.io import engine_identity
+    from engine.io.sweep import reset_state_for_tests as reset_sweep
+    from engine.io.sweep import stop_sweep
+    from engine.io.worker import reset_state_for_tests as reset_worker
+    from engine.io.worker import stop_worker
+
+    # Pre-test: tear down any leftover state from a previous test that
+    # exited abnormally, then null the handles.
+    await stop_sweep()
+    await stop_worker()
+    reset_sweep()
+    reset_worker()
+    reset_settings()
     engine_identity.reset_engine_user_id()
+
     yield
-    reset_state_for_tests()
+
+    # Post-test: same dance. Cancel tasks first so we don't drop a live
+    # task reference, then wipe the singletons for the next test's loop.
+    await stop_sweep()
+    await stop_worker()
+    reset_sweep()
+    reset_worker()
+    reset_settings()
     engine_identity.reset_engine_user_id()

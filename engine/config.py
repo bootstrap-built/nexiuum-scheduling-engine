@@ -100,6 +100,12 @@ class Settings(BaseSettings):
     port: int = 8002
     log_level: str = "INFO"
 
+    # ── HTTP request limits ──────────────────────────────────────────────
+    # /commit awaits the worker queue, which can wedge if Monday is slow or
+    # an earlier event hangs. Without a per-request timeout the HTTP
+    # connection could block indefinitely. Codex E4 review item.
+    commit_timeout_seconds: float = 30.0
+
     # ── Webhook auth ─────────────────────────────────────────────────────
     # Phase 1: shared secret embedded in the webhook URL path
     # (POST /webhook/monday/<secret>). Monday's `create_webhook` mutation
@@ -137,3 +143,15 @@ def get_settings() -> Settings:
     if _settings is None:
         _settings = Settings()  # type: ignore[call-arg]
     return _settings
+
+
+def reset_settings_for_tests() -> None:
+    """Test helper — clear the cached Settings so the next `get_settings()`
+    call re-reads the environment.
+
+    Without this, tests that monkeypatch env vars (e.g. tweaking
+    `MONDAY_WEBHOOK_SECRET` or `drift_threshold_minutes`) leak the
+    first-loaded values across test modules.
+    """
+    global _settings
+    _settings = None

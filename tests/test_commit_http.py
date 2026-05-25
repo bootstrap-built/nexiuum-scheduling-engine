@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 from unittest.mock import AsyncMock, patch
 from zoneinfo import ZoneInfo
@@ -87,6 +88,11 @@ def test_commit_creates_slot_and_returns_ids(client):
 
 
 def test_commit_rejects_simulate_sentinel(client):
+    """The simulate sentinel must be rejected. After the pydantic numeric-
+    string pattern landed, this rejection happens at validation (422) rather
+    than the in-route defensive check (400). The defensive check stays as
+    belt-and-suspenders in case the schema is ever relaxed.
+    """
     resp = client.post(
         "/commit",
         json={
@@ -96,7 +102,7 @@ def test_commit_rejects_simulate_sentinel(client):
             "quantity": 100000,
         },
     )
-    assert resp.status_code == 400
+    assert resp.status_code == 422
 
 
 def test_commit_requires_non_empty_job_reference():
@@ -120,10 +126,90 @@ def test_commit_rejects_zero_quantity():
         resp = c.post(
             "/commit",
             json={
-                "job_reference_id": "J1",
+                "job_reference_id": "11801201557",
                 "recipe_key": "x",
                 "recipe_version": 1,
                 "quantity": 0,
             },
         )
     assert resp.status_code == 422
+
+
+def test_commit_rejects_non_numeric_job_reference():
+    """job_reference_id must be a Monday item id (digits only)."""
+    with TestClient(app) as c:
+        resp = c.post(
+            "/commit",
+            json={
+                "job_reference_id": "abc123",
+                "recipe_key": "x",
+                "recipe_version": 1,
+                "quantity": 100,
+            },
+        )
+    assert resp.status_code == 422
+
+
+def test_commit_rejects_recipe_key_with_invalid_chars():
+    """recipe_key is kebab-case only — uppercase, spaces, dots are out."""
+    with TestClient(app) as c:
+        for bad in ("Tablet-Press", "tablet press", "tablet.press", " tablet"):
+            resp = c.post(
+                "/commit",
+                json={
+                    "job_reference_id": "11801201557",
+                    "recipe_key": bad,
+                    "recipe_version": 1,
+                    "quantity": 100,
+                },
+            )
+            assert resp.status_code == 422, f"expected 422 for recipe_key={bad!r}"
+
+
+def test_commit_rejects_recipe_key_too_long():
+    """recipe_key max_length=64 — Monday text column would happily accept more."""
+    with TestClient(app) as c:
+        resp = c.post(
+            "/commit",
+            json={
+                "job_reference_id": "11801201557",
+                "recipe_key": "a" * 65,
+                "recipe_version": 1,
+                "quantity": 100,
+            },
+        )
+    assert resp.status_code == 422
+
+
+def test_commit_returns_504_on_worker_timeout(monkeypatch):
+    """If the worker doesn't respond within commit_timeout_seconds, return 504.
+
+    The submitted event stays on the queue (no rollback); the HTTP caller
+    can retry without producing duplicate work because the engine is
+    idempotent on the upstream Blend Records id.
+    """
+    from engine.io.worker import start_worker, stop_worker
+
+    async def _hang(*_a, **_kw):
+        await asyncio.sleep(10)
+
+    monkeypatch.setenv("COMMIT_TIMEOUT_SECONDS", "0.1")
+
+    with (
+        patch("engine.io.worker.read_snapshot", new_callable=AsyncMock) as mock_snap,
+        patch("engine.io.worker.apply_plan", side_effect=_hang),
+        patch("engine.io.worker.now_local", return_value=NOW),
+    ):
+        mock_snap.return_value = _fake_snapshot()
+        with TestClient(app) as c:
+            resp = c.post(
+                "/commit",
+                json={
+                    "job_reference_id": "11801201557",
+                    "recipe_key": "tablet-press-standard",
+                    "recipe_version": 1,
+                    "quantity": 100000,
+                },
+            )
+    assert resp.status_code == 504
+    assert "did not respond" in resp.json()["detail"]
