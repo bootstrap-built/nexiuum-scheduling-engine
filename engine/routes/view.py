@@ -324,12 +324,17 @@ function render() {
   const t0 = now.getTime() - span * 0.15;  // a little history on the left
   const t1 = t0 + span;
 
-  // Geometry
-  const laneH = 34, hdrH = 28;
+  // Geometry — keep in sync with the labels-gutter CSS:
+  //   .labels  padding-top: 28px            (= topAxisH — reserved for the time-axis strip)
+  //   .grp-l   height:      28px            (= hdrH    — "PRESS" / "CAPSULE" / "PACKAGING" band)
+  //   .lane-l  height:      34px            (= laneH   — one machine row)
+  // If you change any of these constants, change the matching CSS var (--hdr-h / --lane-h)
+  // or the labels will drift out of alignment with the SVG lanes.
+  const laneH = 34, hdrH = 28, topAxisH = 28;
   const rowsByGroup = GROUP_ORDER.map(g => byGroup[g].length).filter(n => n > 0);
   const totalRows = rowsByGroup.reduce((a,b) => a + b, 0);
   const groupCount = rowsByGroup.length;
-  const innerH = totalRows * laneH + groupCount * hdrH;
+  const innerH = topAxisH + totalRows * laneH + groupCount * hdrH;
   const scroll = document.getElementById('scroll');
   const innerW = Math.max(scroll.clientWidth, 1200);
   const padL = 16, padR = 16;
@@ -337,11 +342,12 @@ function render() {
 
   const x = t => padL + ((t - t0) / (t1 - t0)) * plotW;
 
-  // Lane y center, accounting for group headers
+  // Lane y center, accounting for the top-axis strip + group headers.
+  // Mirrors the labels gutter exactly: padding-top → group header → rows.
   function laneY(machineId) {
     const li = laneIndex.get(machineId);
     if (li == null) return null;
-    let y = 0, seenRows = 0;
+    let y = topAxisH, seenRows = 0;
     for (const g of GROUP_ORDER) {
       const n = byGroup[g].length;
       if (n === 0) continue;
@@ -361,8 +367,15 @@ function render() {
   svg.innerHTML = '';
   const ns = 'http://www.w3.org/2000/svg';
 
-  // Group separator lines + headers
-  let y = 0;
+  // Top-axis strip (matches the labels gutter's padding-top)
+  const axisBg = document.createElementNS(ns, 'rect');
+  axisBg.setAttribute('x', 0); axisBg.setAttribute('y', 0);
+  axisBg.setAttribute('width', innerW); axisBg.setAttribute('height', topAxisH);
+  axisBg.setAttribute('fill', 'var(--panel)');
+  svg.appendChild(axisBg);
+
+  // Group separator bands (one per process group, sits just below the time axis)
+  let y = topAxisH;
   for (const g of GROUP_ORDER) {
     const n = byGroup[g].length;
     if (n === 0) continue;
@@ -371,7 +384,6 @@ function render() {
     sep.setAttribute('width', innerW); sep.setAttribute('height', hdrH);
     sep.setAttribute('fill', 'var(--panel)');
     svg.appendChild(sep);
-    // Top border
     const border = document.createElementNS(ns, 'line');
     border.setAttribute('x1', 0); border.setAttribute('x2', innerW);
     border.setAttribute('y1', y); border.setAttribute('y2', y);
@@ -387,14 +399,16 @@ function render() {
   let tt = Math.ceil(t0 / tickStep) * tickStep;
   while (tt < t1) {
     const xx = x(tt);
+    // Grid lines start below the time-axis strip so they don't render through
+    // the tick labels.
     const line = document.createElementNS(ns, 'line');
     line.setAttribute('x1', xx); line.setAttribute('x2', xx);
-    line.setAttribute('y1', 0); line.setAttribute('y2', innerH);
+    line.setAttribute('y1', topAxisH); line.setAttribute('y2', innerH);
     line.setAttribute('stroke', 'var(--grid)');
     svg.appendChild(line);
     const d = new Date(tt);
     const lbl = document.createElementNS(ns, 'text');
-    lbl.setAttribute('x', xx + 4); lbl.setAttribute('y', 14);
+    lbl.setAttribute('x', xx + 4); lbl.setAttribute('y', 18);
     lbl.setAttribute('class', 'ax');
     const isMidnight = d.getHours() === 0;
     lbl.textContent = isMidnight
@@ -405,12 +419,12 @@ function render() {
     tt += tickStep;
   }
 
-  // Now line
+  // Now line — runs through the lane area only, not the time-axis strip.
   const nowX = x(Date.now());
   if (nowX >= padL && nowX <= innerW - padR) {
     const nl = document.createElementNS(ns, 'line');
     nl.setAttribute('x1', nowX); nl.setAttribute('x2', nowX);
-    nl.setAttribute('y1', 0); nl.setAttribute('y2', innerH);
+    nl.setAttribute('y1', topAxisH); nl.setAttribute('y2', innerH);
     nl.setAttribute('stroke', 'var(--now)');
     nl.setAttribute('stroke-width', 2);
     svg.appendChild(nl);
