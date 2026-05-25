@@ -23,6 +23,7 @@ from engine.io.sweep import start_sweep, stop_sweep
 from engine.io.worker import start_worker, stop_worker
 from engine.routes.commit import router as commit_router
 from engine.routes.simulate import router as simulate_router
+from engine.routes.view import router as view_router
 from engine.routes.webhook import router as webhook_router
 
 # Configure application logging early so engine.* loggers emit at the
@@ -62,6 +63,7 @@ app = FastAPI(
 app.include_router(simulate_router)
 app.include_router(commit_router)
 app.include_router(webhook_router)
+app.include_router(view_router)
 
 
 @app.get("/health")
