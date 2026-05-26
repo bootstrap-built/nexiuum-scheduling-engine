@@ -6,8 +6,64 @@ All scheduling-relevant configuration lives here. Boards are referenced by ID
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from typing import Literal
+
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+# ── Per-board column-id maps ─────────────────────────────────────────────
+# Each Monday board gets fresh column IDs at creation time, so dual-instance
+# parsing needs to pick the right ID set based on the board the row came
+# from. These small dataclasses bundle a board's column IDs into a single
+# argument the parsers can take.
+
+
+@dataclass(frozen=True)
+class CapacityEngineCols:
+    status: str
+    capacity: str
+    hours_per_day: str
+    window_start: str
+    window_end: str
+    changeover: str
+    process_group: str
+    dual_sided: str
+    max_job_size: str
+    force_route: str
+    last_job_ended_at: str
+    notes: str
+
+
+@dataclass(frozen=True)
+class ProcessRecipeCols:
+    key: str
+    version: str
+    status: str
+    stages: str
+
+
+@dataclass(frozen=True)
+class ScheduleCols:
+    machine: str
+    job_reference: str
+    stage_id: str
+    recipe_key: str
+    recipe_version: str
+    quantity: str
+    capacity_mirror: str
+    duration_formula: str
+    planned_start: str
+    planned_end: str
+    actual_start: str
+    actual_end: str
+    dependent_on: str
+    status: str
+    manually_placed: str
+    priority: str
+    last_reflow_hash: str
+    drift_last_detected_at: str
 
 
 class Settings(BaseSettings):
@@ -49,10 +105,18 @@ class Settings(BaseSettings):
         0, alias="NEXIUUM_PROCESS_RECIPE_BOARD",
         description="Phase 2 — Nexiuum Process Recipe board id (0 = unconfigured)",
     )
+    nexiuum_schedule_board: int = Field(
+        0, alias="NEXIUUM_SCHEDULE_BOARD",
+        description="Phase 2 — Nexiuum Schedule board id (0 = unconfigured). "
+        "Slots for packaging stages get written here per Option B (2 boards, "
+        "unified Marey view via /schedule.json).",
+    )
 
-    # ── Schedule board column IDs ────────────────────────────────────────
+    # ── Schedule board column IDs (Gray Space — Phase 1) ─────────────────
     # Captured from the board after creation. Hardcoded because Monday's API
-    # requires column IDs (not titles) for mutations.
+    # requires column IDs (not titles) for mutations. Each Monday board gets
+    # its own column IDs at creation time, so Nexiuum needs a separate set
+    # below.
     col_schedule_machine: str = "board_relation_mm3gn2vv"
     col_schedule_job_reference: str = "board_relation_mm3hx401"
     col_schedule_stage_id: str = "text_mm3hrkha"
@@ -86,11 +150,52 @@ class Settings(BaseSettings):
     col_cap_last_job_ended_at: str = "date_mm3h5h9j"
     col_cap_notes: str = "long_text_mm3ha7b6"
 
-    # ── Process Recipe column IDs ────────────────────────────────────────
+    # ── Process Recipe column IDs (Gray Space) ───────────────────────────
     col_recipe_key: str = "text_mm3hbfjj"
     col_recipe_version: str = "numeric_mm3heae"
     col_recipe_status: str = "color_mm3hfww4"
     col_recipe_stages: str = "long_text_mm3hxf7h"
+
+    # ── Nexiuum column IDs (Phase 2) ─────────────────────────────────────
+    # Captured from boards provisioned 2026-05-25. Different from Gray Space
+    # column IDs because Monday issues fresh column IDs per board.
+    # Capacity Engine (board 18414776125):
+    col_nx_cap_status: str = "color_mm3pgenv"
+    col_nx_cap_capacity: str = "numeric_mm3p3vf1"
+    col_nx_cap_hours_per_day: str = "numeric_mm3pykc4"
+    col_nx_cap_window_start: str = "numeric_mm3prxx9"
+    col_nx_cap_window_end: str = "numeric_mm3ptd6g"
+    col_nx_cap_changeover: str = "numeric_mm3pptyx"
+    col_nx_cap_process_group: str = "color_mm3pyah"
+    col_nx_cap_dual_sided: str = "boolean_mm3pyrrj"
+    col_nx_cap_max_job_size: str = "numeric_mm3peq9p"
+    col_nx_cap_force_route: str = "text_mm3pchdt"
+    col_nx_cap_last_job_ended_at: str = "date_mm3pz2sz"
+    col_nx_cap_notes: str = "long_text_mm3p8eca"
+    # Process Recipe (board 18414776199):
+    col_nx_recipe_key: str = "text_mm3psy0d"
+    col_nx_recipe_version: str = "numeric_mm3pvgj5"
+    col_nx_recipe_status: str = "color_mm3pfew0"
+    col_nx_recipe_stages: str = "long_text_mm3p5bmn"
+    # Schedule (board 18414776220):
+    col_nx_schedule_machine: str = "board_relation_mm3qxz64"
+    col_nx_schedule_job_reference: str = "board_relation_mm3qf09v"
+    col_nx_schedule_stage_id: str = "text_mm3pfvk4"
+    col_nx_schedule_recipe_key: str = "text_mm3ppx1w"
+    col_nx_schedule_recipe_version: str = "numeric_mm3p900w"
+    col_nx_schedule_quantity: str = "numeric_mm3pasam"
+    col_nx_schedule_capacity_mirror: str = "lookup_mm3qbysy"
+    col_nx_schedule_duration_formula: str = "formula_mm3p4axb"
+    col_nx_schedule_planned_start: str = "date_mm3pc27v"
+    col_nx_schedule_planned_end: str = "date_mm3pqw19"
+    col_nx_schedule_actual_start: str = "date_mm3pd2vb"
+    col_nx_schedule_actual_end: str = "date_mm3pb62w"
+    col_nx_schedule_dependent_on: str = "dependency_mm3p48hp"
+    col_nx_schedule_status: str = "color_mm3pt6kh"
+    col_nx_schedule_manually_placed: str = "boolean_mm3pxeat"
+    col_nx_schedule_priority: str = "color_mm3patr6"
+    col_nx_schedule_last_reflow_hash: str = "text_mm3prf9j"
+    col_nx_schedule_drift_last_detected_at: str = "date_mm3pdj0y"
 
     # ── Blend Records column IDs (source board for press actuals) ────────
     col_blend_status: str = "color_mm1mb9cm"  # "Blend Status" — flips to "Pressing" → actual_start
@@ -166,29 +271,36 @@ class Settings(BaseSettings):
         means "the operator deliberately configured Phase 2 reads."
 
         Rules:
-        - If any Nexiuum board ID > 0, BOTH board IDs must be > 0 AND the
-          Nexiuum token must be non-empty (you can't read Nexiuum boards
-          without a token).
-        - If both board IDs are 0, the token is ignored (single-instance
+        - If ANY Nexiuum board ID > 0, ALL three (cap engine, recipe,
+          schedule) must be > 0 AND the Nexiuum token must be non-empty.
+        - If all board IDs are 0, the token is ignored (single-instance
           Phase 1 mode regardless of token presence).
         """
         cap_set = self.nexiuum_capacity_engine_board > 0
         rec_set = self.nexiuum_process_recipe_board > 0
+        sch_set = self.nexiuum_schedule_board > 0
+        flags = {
+            "NEXIUUM_CAPACITY_ENGINE_BOARD": cap_set,
+            "NEXIUUM_PROCESS_RECIPE_BOARD": rec_set,
+            "NEXIUUM_SCHEDULE_BOARD": sch_set,
+        }
+        set_count = sum(flags.values())
 
         # No opt-in: ignore token entirely.
-        if not cap_set and not rec_set:
+        if set_count == 0:
             return self
 
-        # Partial opt-in: one board set but not the other.
-        if cap_set != rec_set:
+        # Partial opt-in: some boards set, others unset.
+        if set_count < len(flags):
+            set_names = [k for k, v in flags.items() if v]
+            unset_names = [k for k, v in flags.items() if not v]
             raise ValueError(
                 "Partial Nexiuum board config: "
-                f"NEXIUUM_CAPACITY_ENGINE_BOARD={'set' if cap_set else 'unset'}, "
-                f"NEXIUUM_PROCESS_RECIPE_BOARD={'set' if rec_set else 'unset'}. "
-                "Set both Nexiuum board IDs or leave both at 0."
+                f"set={set_names}, unset={unset_names}. "
+                "Set all three Nexiuum board IDs or leave all at 0."
             )
 
-        # Both boards set but no token: can't read them.
+        # All boards set but no token: can't read them.
         if not self.nexiuum_monday_token:
             raise ValueError(
                 "Nexiuum board IDs are set but MONDAY_NEXIUUM_TOKEN is empty. "
@@ -198,11 +310,113 @@ class Settings(BaseSettings):
 
     @property
     def nexiuum_enabled(self) -> bool:
-        """True iff all Nexiuum-side config is populated."""
+        """True iff all Nexiuum-side config is populated (token + 3 boards)."""
         return (
             bool(self.nexiuum_monday_token)
             and self.nexiuum_capacity_engine_board > 0
             and self.nexiuum_process_recipe_board > 0
+            and self.nexiuum_schedule_board > 0
+        )
+
+    # ── Per-instance column maps ─────────────────────────────────────────
+    # Parsers call these to pick the right column-id set for the instance
+    # the item came from. Keeps the parsers instance-agnostic — they just
+    # consume a CapacityEngineCols / ProcessRecipeCols / ScheduleCols.
+
+    def cap_cols(self, instance: Literal["gray_space", "nexiuum"]) -> CapacityEngineCols:
+        if instance == "nexiuum":
+            return CapacityEngineCols(
+                status=self.col_nx_cap_status,
+                capacity=self.col_nx_cap_capacity,
+                hours_per_day=self.col_nx_cap_hours_per_day,
+                window_start=self.col_nx_cap_window_start,
+                window_end=self.col_nx_cap_window_end,
+                changeover=self.col_nx_cap_changeover,
+                process_group=self.col_nx_cap_process_group,
+                dual_sided=self.col_nx_cap_dual_sided,
+                max_job_size=self.col_nx_cap_max_job_size,
+                force_route=self.col_nx_cap_force_route,
+                last_job_ended_at=self.col_nx_cap_last_job_ended_at,
+                notes=self.col_nx_cap_notes,
+            )
+        return CapacityEngineCols(
+            status=self.col_cap_status,
+            capacity=self.col_cap_capacity,
+            hours_per_day=self.col_cap_hours_per_day,
+            window_start=self.col_cap_window_start,
+            window_end=self.col_cap_window_end,
+            changeover=self.col_cap_changeover,
+            process_group=self.col_cap_process_group,
+            dual_sided=self.col_cap_dual_sided,
+            max_job_size=self.col_cap_max_job_size,
+            force_route=self.col_cap_force_route,
+            last_job_ended_at=self.col_cap_last_job_ended_at,
+            notes=self.col_cap_notes,
+        )
+
+    def recipe_cols(self, instance: Literal["gray_space", "nexiuum"]) -> ProcessRecipeCols:
+        if instance == "nexiuum":
+            return ProcessRecipeCols(
+                key=self.col_nx_recipe_key,
+                version=self.col_nx_recipe_version,
+                status=self.col_nx_recipe_status,
+                stages=self.col_nx_recipe_stages,
+            )
+        return ProcessRecipeCols(
+            key=self.col_recipe_key,
+            version=self.col_recipe_version,
+            status=self.col_recipe_status,
+            stages=self.col_recipe_stages,
+        )
+
+    def schedule_cols(self, instance: Literal["gray_space", "nexiuum"]) -> ScheduleCols:
+        if instance == "nexiuum":
+            return ScheduleCols(
+                machine=self.col_nx_schedule_machine,
+                job_reference=self.col_nx_schedule_job_reference,
+                stage_id=self.col_nx_schedule_stage_id,
+                recipe_key=self.col_nx_schedule_recipe_key,
+                recipe_version=self.col_nx_schedule_recipe_version,
+                quantity=self.col_nx_schedule_quantity,
+                capacity_mirror=self.col_nx_schedule_capacity_mirror,
+                duration_formula=self.col_nx_schedule_duration_formula,
+                planned_start=self.col_nx_schedule_planned_start,
+                planned_end=self.col_nx_schedule_planned_end,
+                actual_start=self.col_nx_schedule_actual_start,
+                actual_end=self.col_nx_schedule_actual_end,
+                dependent_on=self.col_nx_schedule_dependent_on,
+                status=self.col_nx_schedule_status,
+                manually_placed=self.col_nx_schedule_manually_placed,
+                priority=self.col_nx_schedule_priority,
+                last_reflow_hash=self.col_nx_schedule_last_reflow_hash,
+                drift_last_detected_at=self.col_nx_schedule_drift_last_detected_at,
+            )
+        return ScheduleCols(
+            machine=self.col_schedule_machine,
+            job_reference=self.col_schedule_job_reference,
+            stage_id=self.col_schedule_stage_id,
+            recipe_key=self.col_schedule_recipe_key,
+            recipe_version=self.col_schedule_recipe_version,
+            quantity=self.col_schedule_quantity,
+            capacity_mirror=self.col_schedule_capacity_mirror,
+            duration_formula=self.col_schedule_duration_formula,
+            planned_start=self.col_schedule_planned_start,
+            planned_end=self.col_schedule_planned_end,
+            actual_start=self.col_schedule_actual_start,
+            actual_end=self.col_schedule_actual_end,
+            dependent_on=self.col_schedule_dependent_on,
+            status=self.col_schedule_status,
+            manually_placed=self.col_schedule_manually_placed,
+            priority=self.col_schedule_priority,
+            last_reflow_hash=self.col_schedule_last_reflow_hash,
+            drift_last_detected_at=self.col_schedule_drift_last_detected_at,
+        )
+
+    def schedule_board(self, instance: Literal["gray_space", "nexiuum"]) -> int:
+        """Schedule board id for the given instance."""
+        return (
+            self.nexiuum_schedule_board if instance == "nexiuum"
+            else self.gray_space_schedule_board
         )
 
 

@@ -18,8 +18,8 @@ import pytest
 
 from engine.config import Settings, get_settings, reset_settings_for_tests
 from engine.io.monday import MondayClient
-from engine.io.snapshot import read_snapshot
-from engine.models import Snapshot
+from engine.io.snapshot import _parse_machine, _parse_recipe, _parse_slot, read_snapshot
+from engine.models import MachineStatus, Snapshot
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -42,10 +42,11 @@ def test_settings_token_alone_is_phase_1_mode(monkeypatch: pytest.MonkeyPatch) -
 
 
 def test_settings_rejects_partial_board_config(monkeypatch: pytest.MonkeyPatch) -> None:
-    """One Nexiuum board ID set but not the other = partial config, must raise."""
+    """Some Nexiuum board IDs set but not all three = partial config, must raise."""
     monkeypatch.setenv("MONDAY_NEXIUUM_TOKEN", "fake-token")
     monkeypatch.setenv("NEXIUUM_CAPACITY_ENGINE_BOARD", "12345")
-    monkeypatch.delenv("NEXIUUM_PROCESS_RECIPE_BOARD", raising=False)
+    monkeypatch.setenv("NEXIUUM_PROCESS_RECIPE_BOARD", "67890")
+    monkeypatch.delenv("NEXIUUM_SCHEDULE_BOARD", raising=False)
     reset_settings_for_tests()
     with pytest.raises(Exception) as excinfo:
         Settings()  # type: ignore[call-arg]
@@ -55,13 +56,14 @@ def test_settings_rejects_partial_board_config(monkeypatch: pytest.MonkeyPatch) 
 def test_settings_rejects_boards_set_without_token(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Both Nexiuum boards set without a token = error.
+    """All three Nexiuum boards set without a token = error.
 
     You can't actually read those boards without auth, so fail loud.
     """
     monkeypatch.setenv("MONDAY_NEXIUUM_TOKEN", "")
     monkeypatch.setenv("NEXIUUM_CAPACITY_ENGINE_BOARD", "12345")
     monkeypatch.setenv("NEXIUUM_PROCESS_RECIPE_BOARD", "67890")
+    monkeypatch.setenv("NEXIUUM_SCHEDULE_BOARD", "11111")
     reset_settings_for_tests()
     with pytest.raises(Exception) as excinfo:
         Settings()  # type: ignore[call-arg]
@@ -69,15 +71,17 @@ def test_settings_rejects_boards_set_without_token(
 
 
 def test_settings_accepts_full_nexiuum_config(monkeypatch: pytest.MonkeyPatch) -> None:
-    """All three Nexiuum fields populated → valid, nexiuum_enabled True."""
+    """All four Nexiuum fields populated → valid, nexiuum_enabled True."""
     monkeypatch.setenv("MONDAY_NEXIUUM_TOKEN", "fake-nexiuum-token")
     monkeypatch.setenv("NEXIUUM_CAPACITY_ENGINE_BOARD", "111")
     monkeypatch.setenv("NEXIUUM_PROCESS_RECIPE_BOARD", "222")
+    monkeypatch.setenv("NEXIUUM_SCHEDULE_BOARD", "333")
     reset_settings_for_tests()
     s = Settings()  # type: ignore[call-arg]
     assert s.nexiuum_enabled is True
     assert s.nexiuum_capacity_engine_board == 111
     assert s.nexiuum_process_recipe_board == 222
+    assert s.nexiuum_schedule_board == 333
 
 
 def test_settings_accepts_no_nexiuum_config(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -85,9 +89,144 @@ def test_settings_accepts_no_nexiuum_config(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setenv("MONDAY_NEXIUUM_TOKEN", "")
     monkeypatch.delenv("NEXIUUM_CAPACITY_ENGINE_BOARD", raising=False)
     monkeypatch.delenv("NEXIUUM_PROCESS_RECIPE_BOARD", raising=False)
+    monkeypatch.delenv("NEXIUUM_SCHEDULE_BOARD", raising=False)
     reset_settings_for_tests()
     s = Settings()  # type: ignore[call-arg]
     assert s.nexiuum_enabled is False
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Parser — uses per-instance column IDs (regression test, 2026-05-25)
+# ─────────────────────────────────────────────────────────────────────────
+#
+# The Track B refactor silently parsed Nexiuum items with Gray Space column
+# IDs, producing machines with capacity=0 and process_group=None. The new
+# tests didn't catch it because they used items with empty column_values.
+# These tests pin the per-instance column-id wiring against real column IDs.
+
+
+def test_parse_machine_uses_nexiuum_columns_for_nexiuum_instance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Nexiuum machine item must be parsed with Nexiuum column IDs.
+
+    Regression for the Track B silent parser bug. We construct a Monday item
+    payload using Nexiuum column IDs and assert the parser reads the
+    Capacity field. If the parser used Gray Space column IDs (the bug),
+    capacity would default to 0.0.
+    """
+    monkeypatch.setenv("MONDAY_NEXIUUM_TOKEN", "x")
+    monkeypatch.setenv("NEXIUUM_CAPACITY_ENGINE_BOARD", "1")
+    monkeypatch.setenv("NEXIUUM_PROCESS_RECIPE_BOARD", "2")
+    monkeypatch.setenv("NEXIUUM_SCHEDULE_BOARD", "3")
+    reset_settings_for_tests()
+    s = get_settings()
+
+    cols = s.cap_cols("nexiuum")
+    item = {
+        "id": "nx-machine-1",
+        "name": "Sachet-1",
+        "column_values": [
+            {"id": cols.capacity, "text": "1750"},
+            {"id": cols.process_group, "text": "Sachet"},
+            {"id": cols.status, "text": "Online"},
+        ],
+    }
+    machine = _parse_machine(item, s, instance="nexiuum")
+    assert machine.name == "Sachet-1"
+    assert machine.capacity_per_hour == 1750.0  # would be 0.0 with the bug
+    assert machine.process_group == "Sachet"  # would be None with the bug
+    assert machine.status == MachineStatus.ONLINE
+    assert machine.instance == "nexiuum"
+
+
+def test_parse_machine_uses_gray_space_columns_for_gray_space_instance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Gray Space items continue to parse with Gray Space column IDs.
+
+    The two instances have different column IDs — parser must not cross
+    the streams in either direction.
+    """
+    monkeypatch.setenv("MONDAY_NEXIUUM_TOKEN", "")
+    monkeypatch.delenv("NEXIUUM_CAPACITY_ENGINE_BOARD", raising=False)
+    monkeypatch.delenv("NEXIUUM_PROCESS_RECIPE_BOARD", raising=False)
+    monkeypatch.delenv("NEXIUUM_SCHEDULE_BOARD", raising=False)
+    reset_settings_for_tests()
+    s = get_settings()
+
+    cols = s.cap_cols("gray_space")
+    item = {
+        "id": "gs-machine-1",
+        "name": "Gandalf",
+        "column_values": [
+            {"id": cols.capacity, "text": "40000"},
+            {"id": cols.process_group, "text": "Pressing"},
+            {"id": cols.status, "text": "Online"},
+        ],
+    }
+    machine = _parse_machine(item, s, instance="gray_space")
+    assert machine.capacity_per_hour == 40000.0
+    assert machine.process_group == "Pressing"
+    assert machine.instance == "gray_space"
+
+
+def test_parse_machine_gray_space_columns_do_not_apply_to_nexiuum_items(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If a Nexiuum item carries only Gray Space column IDs (the bug
+    scenario), the parser must NOT extract values — confirms separation."""
+    monkeypatch.setenv("MONDAY_NEXIUUM_TOKEN", "x")
+    monkeypatch.setenv("NEXIUUM_CAPACITY_ENGINE_BOARD", "1")
+    monkeypatch.setenv("NEXIUUM_PROCESS_RECIPE_BOARD", "2")
+    monkeypatch.setenv("NEXIUUM_SCHEDULE_BOARD", "3")
+    reset_settings_for_tests()
+    s = get_settings()
+
+    # Build an item with Gray Space column IDs but pass it through the
+    # Nexiuum parser. Result should be empty/default fields.
+    gs_cols = s.cap_cols("gray_space")
+    item_with_gs_cols = {
+        "id": "wrong",
+        "name": "Wrong",
+        "column_values": [
+            {"id": gs_cols.capacity, "text": "9999"},
+            {"id": gs_cols.process_group, "text": "Pressing"},
+        ],
+    }
+    machine = _parse_machine(item_with_gs_cols, s, instance="nexiuum")
+    # Nexiuum parser uses Nexiuum column IDs, so the Gray Space values are
+    # invisible. Capacity defaults to 0.0, process_group to None.
+    assert machine.capacity_per_hour == 0.0
+    assert machine.process_group is None
+
+
+def test_parse_slot_uses_nexiuum_columns_for_nexiuum_instance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Nexiuum slot must be parsed with Nexiuum Schedule column IDs."""
+    monkeypatch.setenv("MONDAY_NEXIUUM_TOKEN", "x")
+    monkeypatch.setenv("NEXIUUM_CAPACITY_ENGINE_BOARD", "1")
+    monkeypatch.setenv("NEXIUUM_PROCESS_RECIPE_BOARD", "2")
+    monkeypatch.setenv("NEXIUUM_SCHEDULE_BOARD", "3")
+    reset_settings_for_tests()
+    s = get_settings()
+
+    cols = s.schedule_cols("nexiuum")
+    item = {
+        "id": "nx-slot-1",
+        "name": "Order-1234 → Sachet-1",
+        "column_values": [
+            {"id": cols.quantity, "text": "5000"},
+            {"id": cols.stage_id, "text": "sachet"},
+            {"id": cols.recipe_key, "text": "tablet-pouch"},
+        ],
+    }
+    slot = _parse_slot(item, s, instance="nexiuum")
+    assert slot.quantity == 5000
+    assert slot.stage_id == "sachet"
+    assert slot.recipe_key == "tablet-pouch"
+    assert slot.instance == "nexiuum"
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -106,6 +245,7 @@ async def test_snapshot_single_instance_unchanged(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setenv("MONDAY_NEXIUUM_TOKEN", "")
     monkeypatch.delenv("NEXIUUM_CAPACITY_ENGINE_BOARD", raising=False)
     monkeypatch.delenv("NEXIUUM_PROCESS_RECIPE_BOARD", raising=False)
+    monkeypatch.delenv("NEXIUUM_SCHEDULE_BOARD", raising=False)
     reset_settings_for_tests()
 
     fake_client = AsyncMock(spec=MondayClient)
@@ -164,6 +304,7 @@ async def test_snapshot_dual_instance_merges_capacity_engines(
     monkeypatch.setenv("MONDAY_NEXIUUM_TOKEN", "fake-nexiuum-token")
     monkeypatch.setenv("NEXIUUM_CAPACITY_ENGINE_BOARD", "999111")
     monkeypatch.setenv("NEXIUUM_PROCESS_RECIPE_BOARD", "999222")
+    monkeypatch.setenv("NEXIUUM_SCHEDULE_BOARD", "999333")
     reset_settings_for_tests()
     s = get_settings()
     assert s.nexiuum_enabled is True
@@ -194,11 +335,8 @@ async def test_snapshot_dual_instance_merges_capacity_engines(
             return [_machine_item("nx-m1", "NexiPress-1")]
         if board_id == s.nexiuum_process_recipe_board:
             return [_recipe_item("nx-r1", "capsule-fill-nexi")]
-        if board_id == s.gray_space_schedule_board:
-            # Critical: schedule must NOT be read with Nexiuum client.
-            raise AssertionError(
-                "Schedule board must not be read via Nexiuum client this phase"
-            )
+        if board_id == s.nexiuum_schedule_board:
+            return []  # Phase 2B: Nexiuum Schedule is read but starts empty
         raise AssertionError(f"unexpected Nexiuum board fetch: {board_id}")
 
     nx_client.fetch_board_items = AsyncMock(side_effect=nx_fetch)
@@ -209,16 +347,16 @@ async def test_snapshot_dual_instance_merges_capacity_engines(
     ):
         snap = await read_snapshot()
 
-    # Merged: machines + recipes from both instances, schedule from Gray Space.
+    # Merged: machines + recipes + slots from both instances.
     machine_ids = {(m.id, m.instance) for m in snap.machines}
     recipe_ids = {(r.id, r.instance) for r in snap.recipes}
 
     assert machine_ids == {("gs-m1", "gray_space"), ("nx-m1", "nexiuum")}
     assert recipe_ids == {("gs-r1", "gray_space"), ("nx-r1", "nexiuum")}
 
-    # Schedule reads stay Gray-Space-only — exactly 3 GS reads, 2 NX reads.
+    # 3 board reads each instance now (cap engine, recipes, schedule).
     assert gs_client.fetch_board_items.call_count == 3
-    assert nx_client.fetch_board_items.call_count == 2
+    assert nx_client.fetch_board_items.call_count == 3
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -236,6 +374,7 @@ async def test_monday_client_uses_correct_token_per_instance(
     monkeypatch.setenv("MONDAY_NEXIUUM_TOKEN", "nx-token-BBB")
     monkeypatch.setenv("NEXIUUM_CAPACITY_ENGINE_BOARD", "111")
     monkeypatch.setenv("NEXIUUM_PROCESS_RECIPE_BOARD", "222")
+    monkeypatch.setenv("NEXIUUM_SCHEDULE_BOARD", "333")
     reset_settings_for_tests()
 
     seen_tokens: list[str] = []

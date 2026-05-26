@@ -134,6 +134,7 @@ class Slot:
     priority: Priority
     last_reflow_hash: str | None
     drift_last_detected_at: datetime | None
+    instance: MondayInstance = "gray_space"
 
     @property
     def is_immovable(self) -> bool:
