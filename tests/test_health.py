@@ -56,9 +56,41 @@ def test_health_shape_has_all_expected_keys():
     """Lock the contract for monitoring integration."""
     client = TestClient(app)
     body = client.get("/health").json()
-    assert set(body.keys()) >= {"status", "version", "worker", "sweep"}
+    assert set(body.keys()) >= {
+        "status", "version", "worker", "sweep",
+        # Phase 2: dual-instance mode visibility
+        "mode", "nexiuum_enabled",
+    }
     assert set(body["worker"].keys()) >= {"alive", "queue_depth", "last_error"}
     assert set(body["sweep"].keys()) >= {"alive", "last_error"}
+
+
+def test_health_reports_single_mode_when_nexiuum_disabled(monkeypatch):
+    """With no Nexiuum board IDs, /health reports single-instance mode."""
+    from engine.config import reset_settings_for_tests
+    monkeypatch.setenv("MONDAY_NEXIUUM_TOKEN", "")
+    monkeypatch.delenv("NEXIUUM_CAPACITY_ENGINE_BOARD", raising=False)
+    monkeypatch.delenv("NEXIUUM_PROCESS_RECIPE_BOARD", raising=False)
+    monkeypatch.delenv("NEXIUUM_SCHEDULE_BOARD", raising=False)
+    reset_settings_for_tests()
+    client = TestClient(app)
+    body = client.get("/health").json()
+    assert body["mode"] == "single"
+    assert body["nexiuum_enabled"] is False
+
+
+def test_health_reports_dual_mode_when_nexiuum_enabled(monkeypatch):
+    """With all Nexiuum board IDs + token set, /health reports dual mode."""
+    from engine.config import reset_settings_for_tests
+    monkeypatch.setenv("MONDAY_NEXIUUM_TOKEN", "fake-nx-token")
+    monkeypatch.setenv("NEXIUUM_CAPACITY_ENGINE_BOARD", "111")
+    monkeypatch.setenv("NEXIUUM_PROCESS_RECIPE_BOARD", "222")
+    monkeypatch.setenv("NEXIUUM_SCHEDULE_BOARD", "333")
+    reset_settings_for_tests()
+    client = TestClient(app)
+    body = client.get("/health").json()
+    assert body["mode"] == "dual"
+    assert body["nexiuum_enabled"] is True
 
 
 @pytest.mark.asyncio

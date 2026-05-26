@@ -68,9 +68,12 @@ app.include_router(view_router)
 
 @app.get("/health")
 async def health() -> dict[str, object]:
-    """Liveness + per-component health.
+    """Liveness + per-component health + dual-instance mode.
 
     `status` is "ok" iff both the worker and sweep tasks are alive.
+    `mode` reports which scheduling mode is active:
+      - "dual"   = reading + writing both Gray Space and Nexiuum
+      - "single" = Gray Space only (Phase 1 behavior)
     Per-component blocks include:
       - alive: task running and not done
       - last_error: most recent exception text (None if last run succeeded)
@@ -78,12 +81,16 @@ async def health() -> dict[str, object]:
 
     Used by deploy smoke tests and (eventually) external monitoring.
     """
+    from engine.config import get_settings  # local import to avoid cycle
+    s = get_settings()
     worker_alive = worker_module.is_worker_alive()
     sweep_alive = sweep_module.is_sweep_alive()
     overall = "ok" if (worker_alive and sweep_alive) else "degraded"
     return {
         "status": overall,
         "version": app.version,
+        "mode": "dual" if s.nexiuum_enabled else "single",
+        "nexiuum_enabled": s.nexiuum_enabled,
         "worker": {
             "alive": worker_alive,
             "queue_depth": worker_module.queue_depth(),

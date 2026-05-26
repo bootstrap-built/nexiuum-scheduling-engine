@@ -159,7 +159,13 @@ def plan_for_drift(
 
     return Plan(
         slot_writes=(
-            SlotWrite(slot_id=slot.id, drift_last_detected_at=now),
+            # Phase 2: inherit instance from the slot so the drift stamp
+            # lands on the correct Schedule board.
+            SlotWrite(
+                slot_id=slot.id,
+                drift_last_detected_at=now,
+                instance=slot.instance,
+            ),
         ),
         notes=(f"drift {event.kind} on slot {slot.id}: stamped drift_last_detected_at",),
     )

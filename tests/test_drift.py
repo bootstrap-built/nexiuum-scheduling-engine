@@ -252,6 +252,37 @@ def test_plan_for_drift_stamps_drift_last_detected_at():
     assert w.status is None
     assert w.planned_start is None
     assert w.actual_start is None
+    # P0 regression (2026-05-26): instance must inherit from the slot so
+    # apply_plan routes the drift stamp to the correct Schedule board.
+    assert w.instance == slot.instance
+
+
+def test_plan_for_drift_nexiuum_slot_inherits_instance():
+    """REGRESSION (P0, 2026-05-26): drift stamp on a Nexiuum slot must
+    write to the Nexiuum Schedule board, not Gray Space."""
+    from engine.models import Priority, Slot, SlotStatus
+
+    nx_slot = Slot(
+        id="NX-S1", name="nx-drift-test",
+        job_reference_id="J1", machine_id="NX-M1",
+        stage_id="blister", recipe_key="recipe", recipe_version=1,
+        quantity=1000,
+        planned_start=NOW - timedelta(minutes=30),
+        planned_end=NOW,
+        actual_start=None, actual_end=None,
+        dependent_on_ids=(), status=SlotStatus.QUEUED,
+        manually_placed=False, priority=Priority.NORMAL,
+        last_reflow_hash=None, drift_last_detected_at=None,
+        instance="nexiuum",
+    )
+    snap = _snapshot((nx_slot,))
+    event = DriftDetected(slot_id="NX-S1", kind="late_start")
+    plan = plan_for_drift(
+        snap, event, now=NOW,
+        threshold_minutes=THRESHOLD, suppression_minutes=SUPPRESSION,
+    )
+    assert len(plan.slot_writes) == 1
+    assert plan.slot_writes[0].instance == "nexiuum"
 
 
 def test_plan_for_drift_noop_when_slot_missing():

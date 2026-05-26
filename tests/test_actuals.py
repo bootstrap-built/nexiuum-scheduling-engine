@@ -362,6 +362,151 @@ def test_baton_pass_skips_manually_placed_dependent():
     assert "blister-1" not in written
 
 
+# ─── P0 regression: SlotWrite.instance must inherit from updated Slot ────
+
+
+def _nexiuum_slot(**kwargs) -> Slot:
+    """Build a Nexiuum-instance Slot. Helper for the P0 regression tests."""
+    defaults = dict(
+        id="nx-1", name="nx-slot",
+        job_reference_id="J1", machine_id="NX-M1",
+        stage_id="blister", recipe_key="tablet-blister-clamshell",
+        recipe_version=1, quantity=100000,
+        planned_start=NOW, planned_end=NOW,
+        actual_start=None, actual_end=None,
+        dependent_on_ids=(), status=SlotStatus.QUEUED,
+        manually_placed=False, priority=Priority.NORMAL,
+        last_reflow_hash=None, drift_last_detected_at=None,
+        instance="nexiuum",
+    )
+    defaults.update(kwargs)
+    return Slot(**defaults)
+
+
+def test_actual_start_write_inherits_nexiuum_instance_from_slot():
+    """REGRESSION (P0, 2026-05-26): SlotWrite.instance must propagate from
+    the updated Slot so apply_plan routes to the right Schedule board.
+    Without this, a Nexiuum slot's actual_start update would silently land
+    on Gray Space Schedule (SlotWrite.instance defaults to 'gray_space')."""
+    nx_slot = _nexiuum_slot(stage_id="blister", status=SlotStatus.QUEUED)
+    snap = Snapshot(
+        read_at=NOW, machines=(_machine(),),
+        recipes=(_multistage_recipe(),), slots=(nx_slot,),
+    )
+    event = ActualStartReported(
+        job_reference_id="J1", stage_id="blister", actual_at=ACTUAL_AT,
+    )
+    plan = plan_for_actual_start(snap, event)
+    assert len(plan.slot_writes) == 1
+    assert plan.slot_writes[0].instance == "nexiuum"
+
+
+def test_actual_end_write_inherits_nexiuum_instance_from_slot():
+    """REGRESSION (P0, 2026-05-26): same as start, but for actual_end."""
+    nx_slot = _nexiuum_slot(
+        stage_id="blister", status=SlotStatus.RUNNING, actual_start=NOW,
+    )
+    snap = Snapshot(
+        read_at=NOW, machines=(_machine(),),
+        recipes=(_multistage_recipe(),), slots=(nx_slot,),
+    )
+    event = ActualEndReported(
+        job_reference_id="J1", stage_id="blister", actual_at=ACTUAL_AT,
+    )
+    plan = plan_for_actual_end(snap, event, handoff_buffer_minutes=30)
+    finishing_writes = [w for w in plan.slot_writes if w.slot_id == "nx-1"]
+    assert len(finishing_writes) == 1
+    assert finishing_writes[0].instance == "nexiuum"
+
+
+def test_baton_pass_write_inherits_dependent_slot_instance():
+    """REGRESSION (P0, 2026-05-26): cross-instance baton-pass — a Gray
+    Space press finishing must push a Nexiuum blister slot's planned_start
+    via a write tagged instance='nexiuum'. Otherwise the engine routes
+    the Nexiuum-board update to the Gray Space board."""
+    gs_press = _multistage_slot(
+        id_="gs-press-1", stage_id="press",
+        status=SlotStatus.RUNNING, actual_start=NOW,
+        planned_start=NOW, planned_end=NOW.replace(hour=11),
+    )
+    # NB: _multistage_slot defaults instance to gray_space — override via
+    # direct Slot construction for the Nexiuum dependent.
+    nx_blister = _nexiuum_slot(
+        id="nx-blister-1", stage_id="blister",
+        planned_start=NOW.replace(hour=11),
+        planned_end=NOW.replace(hour=14),
+    )
+    snap = Snapshot(
+        read_at=NOW, machines=(_machine(),),
+        recipes=(_multistage_recipe(),), slots=(gs_press, nx_blister),
+    )
+    actual_at = NOW.replace(hour=12)  # press finishes 1hr late
+    event = ActualEndReported(
+        job_reference_id="J1", stage_id="press", actual_at=actual_at,
+    )
+    plan = plan_for_actual_end(snap, event, handoff_buffer_minutes=30)
+    by_slot = {w.slot_id: w for w in plan.slot_writes}
+
+    # Press write tagged gray_space; baton-pass write tagged nexiuum.
+    assert by_slot["gs-press-1"].instance == "gray_space"
+    assert by_slot["nx-blister-1"].instance == "nexiuum"
+
+
+def test_baton_pass_does_not_cascade_to_transitive_dependents():
+    """PINNED BEHAVIOR (Phase 2C, 2026-05-26): baton-pass pushes ONLY
+    immediate dependents — not transitive ones.
+
+    Scenario: press finishes very late. press's push moves blister
+    forward into clamshell's territory, but clamshell is NOT pushed —
+    it'll be pushed when blister actually finishes and emits its own
+    ActualEndReported. This boundary is intentional; the docstring on
+    plan_for_actual_end explains why.
+
+    If this test fails, EITHER the cascade behavior was deliberately
+    changed (update the docstring) OR a regression introduced
+    transitive pushing (revert).
+    """
+    actual_at = NOW.replace(hour=15)  # press finishes very late
+    press = _multistage_slot(
+        id_="press-1", stage_id="press",
+        status=SlotStatus.RUNNING, actual_start=NOW,
+        planned_end=NOW.replace(hour=11),
+    )
+    # Blister depends on press, planned at the original press end.
+    blister = _multistage_slot(
+        id_="blister-1", stage_id="blister",
+        planned_start=NOW.replace(hour=11),
+        planned_end=NOW.replace(hour=14),
+    )
+    # Clamshell depends on blister + lotcode (not on press). Currently
+    # planned at 14:00 — would conflict with blister's pushed slot.
+    clamshell = _multistage_slot(
+        id_="clamshell-1", stage_id="clamshell",
+        planned_start=NOW.replace(hour=14),
+        planned_end=NOW.replace(hour=16),
+    )
+    lotcode = _multistage_slot(
+        id_="lot-1", stage_id="lotcode",
+        planned_start=NOW.replace(hour=11),
+        planned_end=NOW.replace(hour=13),
+    )
+    snap = _multistage_snapshot((press, blister, lotcode, clamshell))
+    event = ActualEndReported(
+        job_reference_id="J1", stage_id="press", actual_at=actual_at,
+    )
+
+    plan = plan_for_actual_end(snap, event, handoff_buffer_minutes=30)
+    by_slot = {w.slot_id: w for w in plan.slot_writes}
+
+    # Press, blister, lotcode pushed (all are immediate dependents of press).
+    assert "press-1" in by_slot
+    assert "blister-1" in by_slot
+    assert "lot-1" in by_slot
+    # Clamshell NOT pushed — it depends on blister + lotcode, not on press.
+    # Transitive cascade happens when blister/lotcode actually finish.
+    assert "clamshell-1" not in by_slot
+
+
 def test_baton_pass_handles_dangling_recipe_gracefully():
     """If the recipe pinned on the finishing slot isn't in the snapshot,
     note the issue but don't crash — just stamp the press actual_end."""

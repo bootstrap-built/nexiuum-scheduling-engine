@@ -79,6 +79,9 @@ def plan_for_actual_start(
                 slot_id=slot.id,
                 actual_start=event.actual_at,
                 status=SlotStatus.RUNNING,
+                # Phase 2: inherit instance from the slot so apply_plan
+                # routes the update to the correct Schedule board.
+                instance=slot.instance,
             )
         )
         notes.append(f"slot {slot.id}: actual_start + Status=Running")
@@ -105,6 +108,21 @@ def plan_for_actual_end(
        yank work into the past). Only touches dependent slots that
        aren't already Running/Done/manually-placed — once a slot is in
        flight or finished, the engine doesn't shove it around.
+
+    **IMMEDIATE-DEPENDENTS ONLY (intentional, NOT a bug):**
+    The baton-pass pushes only stages whose `depends_on` directly
+    contains `event.stage_id`. It does NOT transitively cascade.
+    Example: in recipe `press → blister → clamshell`, when press
+    finishes, the baton-pass pushes blister but NOT clamshell — even if
+    pushing blister now means it overlaps clamshell's planned_start.
+    Clamshell will be pushed on the NEXT baton-pass, when blister
+    actually finishes and emits its own ActualEndReported.
+    Rationale: a finished stage's actual_end is the ground truth for
+    its dependents. We don't speculate about when blister WILL finish
+    — we wait for that signal and react then. This keeps the engine
+    deterministic and avoids cascading reflows on every press event.
+    Test `test_baton_pass_does_not_cascade_to_transitive_dependents`
+    pins this boundary.
 
     Empty Plan if no finishing slot matches or all are already finished.
     Idempotent: dependent slots already planned at/after the handoff
@@ -136,6 +154,9 @@ def plan_for_actual_end(
                 slot_id=slot.id,
                 actual_end=event.actual_at,
                 status=SlotStatus.DONE,
+                # Phase 2: inherit instance from the slot so apply_plan
+                # routes the update to the correct Schedule board.
+                instance=slot.instance,
             )
         )
         notes.append(f"slot {slot.id}: actual_end + Status=Done")
@@ -199,6 +220,11 @@ def plan_for_actual_end(
                         slot_id=dep_slot.id,
                         planned_start=handoff_at,
                         planned_end=new_end,
+                        # Phase 2: inherit instance from the dependent slot.
+                        # Critical: a Gray Space press finishing can push a
+                        # Nexiuum packaging slot — that write must route to
+                        # the Nexiuum Schedule board, not Gray Space.
+                        instance=dep_slot.instance,
                     )
                 )
                 notes.append(
