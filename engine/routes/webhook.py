@@ -48,7 +48,7 @@ from engine.config import get_settings
 from engine.core.timezone import now_local
 from engine.io.engine_identity import get_engine_user_id
 from engine.io.worker import WorkerNotRunning, enqueue_event
-from engine.models import ActualStartReported, CapacityChanged
+from engine.models import ActualEndReported, ActualStartReported, CapacityChanged
 
 router = APIRouter(tags=["webhook"])
 log = logging.getLogger(__name__)
@@ -132,28 +132,47 @@ async def webhook_monday(secret: str, request: Request) -> dict[str, Any]:
             return {"status": "received", "kind": "blend_records_ignored_column"}
 
         new_label = _extract_status_label(event.get("value"))
-        if new_label != s.blend_status_pressing_label:
-            log.info(
-                "blend-records status changed to %r (pulse=%s); only %r triggers actual_start",
-                new_label, pulse_id, s.blend_status_pressing_label,
-            )
-            return {"status": "received", "kind": "blend_records_status_not_actionable"}
-
         # Use Monday's changedAt if available (more accurate than webhook
         # receipt time); fall back to now() in factory tz.
         actual_at = _resolve_actual_at(event, s.factory_tz)
-        try:
-            await enqueue_event(
-                ActualStartReported(
-                    job_reference_id=pulse_id,
-                    stage_id=s.blend_status_pressing_stage_id,
-                    actual_at=actual_at,
+
+        if new_label == s.blend_status_pressing_label:
+            try:
+                await enqueue_event(
+                    ActualStartReported(
+                        job_reference_id=pulse_id,
+                        stage_id=s.blend_status_pressing_stage_id,
+                        actual_at=actual_at,
+                    )
                 )
-            )
-        except WorkerNotRunning:
-            log.error("worker not running; dropping ActualStartReported for blend=%s", pulse_id)
-            return {"status": "dropped", "kind": "worker_unavailable"}
-        return {"status": "enqueued", "kind": "actual_start_reported"}
+            except WorkerNotRunning:
+                log.error("worker not running; dropping ActualStartReported for blend=%s", pulse_id)
+                return {"status": "dropped", "kind": "worker_unavailable"}
+            return {"status": "enqueued", "kind": "actual_start_reported"}
+
+        if new_label == s.blend_status_done_label:
+            # Phase 2C: Blend Status → "Done" closes the press stage AND
+            # triggers the baton-pass to any dependent (packaging) slots.
+            try:
+                await enqueue_event(
+                    ActualEndReported(
+                        job_reference_id=pulse_id,
+                        stage_id=s.blend_status_pressing_stage_id,
+                        actual_at=actual_at,
+                    )
+                )
+            except WorkerNotRunning:
+                log.error("worker not running; dropping ActualEndReported for blend=%s", pulse_id)
+                return {"status": "dropped", "kind": "worker_unavailable"}
+            return {"status": "enqueued", "kind": "actual_end_reported"}
+
+        log.info(
+            "blend-records status changed to %r (pulse=%s); "
+            "actionable labels: %r→start, %r→end",
+            new_label, pulse_id,
+            s.blend_status_pressing_label, s.blend_status_done_label,
+        )
+        return {"status": "received", "kind": "blend_records_status_not_actionable"}
 
     return {"status": "received", "kind": "unrecognized_source"}
 

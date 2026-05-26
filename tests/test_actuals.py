@@ -148,3 +148,242 @@ def test_actual_end_idempotent_when_already_done():
     event = ActualEndReported(job_reference_id="J1", stage_id="press", actual_at=ACTUAL_AT)
     plan = plan_for_actual_end(snap, event)
     assert plan.slot_writes == ()
+
+
+# ─── plan_for_actual_end — baton-pass to dependent stages (Phase 2C) ─────
+
+
+def _multistage_recipe() -> Recipe:
+    """Recipe: press → blister and press → lotcode (parallel) → clamshell."""
+    return Recipe(
+        id="R-multi", name="tablet-blister-clamshell",
+        recipe_key="tablet-blister-clamshell", version=1,
+        status=RecipeStatus.ACTIVE,
+        stages=(
+            RecipeStage(id="press", machine_class="Pressing", depends_on=()),
+            RecipeStage(id="blister", machine_class="Blister", depends_on=("press",)),
+            RecipeStage(id="lotcode", machine_class="Lot Coder", depends_on=("press",)),
+            RecipeStage(
+                id="clamshell", machine_class="Clamshell",
+                depends_on=("blister", "lotcode"),
+            ),
+        ),
+    )
+
+
+def _multistage_slot(
+    *,
+    id_: str,
+    stage_id: str,
+    job_reference_id: str = "J1",
+    status: SlotStatus = SlotStatus.QUEUED,
+    planned_start: datetime | None = None,
+    planned_end: datetime | None = None,
+    actual_start: datetime | None = None,
+    actual_end: datetime | None = None,
+    manually_placed: bool = False,
+) -> Slot:
+    return Slot(
+        id=id_, name=f"slot {id_}",
+        job_reference_id=job_reference_id, machine_id="M1",
+        stage_id=stage_id,
+        recipe_key="tablet-blister-clamshell", recipe_version=1,
+        quantity=100000,
+        planned_start=planned_start, planned_end=planned_end,
+        actual_start=actual_start, actual_end=actual_end,
+        dependent_on_ids=(), status=status,
+        manually_placed=manually_placed, priority=Priority.NORMAL,
+        last_reflow_hash=None, drift_last_detected_at=None,
+    )
+
+
+def _multistage_snapshot(slots: tuple[Slot, ...]) -> Snapshot:
+    return Snapshot(
+        read_at=NOW, machines=(_machine(),),
+        recipes=(_multistage_recipe(),), slots=slots,
+    )
+
+
+def test_baton_pass_pushes_dependent_planned_start_forward():
+    """When press's actual_end is set, a dependent blister slot whose
+    planned_start was earlier gets pushed to event.actual_at + buffer."""
+    actual_at = NOW.replace(hour=11)
+    press = _multistage_slot(
+        id_="press-1", stage_id="press",
+        status=SlotStatus.RUNNING, actual_start=NOW,
+        planned_start=NOW, planned_end=NOW.replace(hour=11),
+    )
+    blister = _multistage_slot(
+        id_="blister-1", stage_id="blister",
+        planned_start=NOW.replace(hour=11),
+        planned_end=NOW.replace(hour=14),
+    )
+    snap = _multistage_snapshot((press, blister))
+    event = ActualEndReported(
+        job_reference_id="J1", stage_id="press", actual_at=actual_at,
+    )
+
+    plan = plan_for_actual_end(snap, event, handoff_buffer_minutes=30)
+    by_slot = {w.slot_id: w for w in plan.slot_writes}
+
+    assert by_slot["press-1"].status == SlotStatus.DONE
+    assert by_slot["press-1"].actual_end == actual_at
+
+    expected_start = actual_at.replace(hour=11, minute=30)
+    assert by_slot["blister-1"].planned_start == expected_start
+    # Duration preserved (3hr): planned_end pushed to 14:30
+    assert by_slot["blister-1"].planned_end == actual_at.replace(hour=14, minute=30)
+
+
+def test_baton_pass_skips_dependent_already_past_handoff():
+    """If the dependent slot was already planned to start at/after the
+    handoff cutoff, the baton-pass leaves it alone (no needless write)."""
+    actual_at = NOW.replace(hour=11)
+    press = _multistage_slot(
+        id_="press-1", stage_id="press",
+        status=SlotStatus.RUNNING, actual_start=NOW,
+        planned_end=NOW.replace(hour=11),
+    )
+    blister = _multistage_slot(
+        id_="blister-1", stage_id="blister",
+        planned_start=NOW.replace(hour=13),
+        planned_end=NOW.replace(hour=16),
+    )
+    snap = _multistage_snapshot((press, blister))
+    event = ActualEndReported(
+        job_reference_id="J1", stage_id="press", actual_at=actual_at,
+    )
+
+    plan = plan_for_actual_end(snap, event, handoff_buffer_minutes=30)
+    written = {w.slot_id for w in plan.slot_writes}
+    assert written == {"press-1"}
+
+
+def test_baton_pass_does_not_pull_dependent_earlier():
+    """Dependent slot planned LATER than the handoff cutoff stays put."""
+    actual_at = NOW.replace(hour=8)
+    press = _multistage_slot(
+        id_="press-1", stage_id="press",
+        status=SlotStatus.RUNNING, actual_start=NOW,
+        planned_end=NOW.replace(hour=11),
+    )
+    blister = _multistage_slot(
+        id_="blister-1", stage_id="blister",
+        planned_start=NOW.replace(hour=15),
+        planned_end=NOW.replace(hour=18),
+    )
+    snap = _multistage_snapshot((press, blister))
+    event = ActualEndReported(
+        job_reference_id="J1", stage_id="press", actual_at=actual_at,
+    )
+
+    plan = plan_for_actual_end(snap, event, handoff_buffer_minutes=30)
+    written = {w.slot_id for w in plan.slot_writes}
+    assert "blister-1" not in written
+
+
+def test_baton_pass_pushes_multiple_parallel_dependents():
+    """Both blister and lotcode depend on press — both get pushed."""
+    actual_at = NOW.replace(hour=12)
+    press = _multistage_slot(
+        id_="press-1", stage_id="press",
+        status=SlotStatus.RUNNING, actual_start=NOW,
+        planned_end=NOW.replace(hour=11),
+    )
+    blister = _multistage_slot(
+        id_="blister-1", stage_id="blister",
+        planned_start=NOW.replace(hour=11), planned_end=NOW.replace(hour=14),
+    )
+    lotcode = _multistage_slot(
+        id_="lot-1", stage_id="lotcode",
+        planned_start=NOW.replace(hour=11), planned_end=NOW.replace(hour=13),
+    )
+    clamshell = _multistage_slot(
+        id_="cs-1", stage_id="clamshell",
+        # clamshell depends on blister/lotcode only — not press directly
+        planned_start=NOW.replace(hour=14), planned_end=NOW.replace(hour=16),
+    )
+    snap = _multistage_snapshot((press, blister, lotcode, clamshell))
+    event = ActualEndReported(
+        job_reference_id="J1", stage_id="press", actual_at=actual_at,
+    )
+
+    plan = plan_for_actual_end(snap, event, handoff_buffer_minutes=30)
+    by_slot = {w.slot_id: w for w in plan.slot_writes}
+    assert set(by_slot.keys()) == {"press-1", "blister-1", "lot-1"}
+    expected_handoff = actual_at.replace(hour=12, minute=30)
+    assert by_slot["blister-1"].planned_start == expected_handoff
+    assert by_slot["lot-1"].planned_start == expected_handoff
+
+
+def test_baton_pass_skips_immovable_dependent():
+    """Running dependent slot must not be shoved around."""
+    actual_at = NOW.replace(hour=12)
+    press = _multistage_slot(
+        id_="press-1", stage_id="press",
+        status=SlotStatus.RUNNING, actual_start=NOW,
+        planned_end=NOW.replace(hour=11),
+    )
+    blister = _multistage_slot(
+        id_="blister-1", stage_id="blister",
+        status=SlotStatus.RUNNING, actual_start=NOW.replace(hour=11),
+        planned_start=NOW.replace(hour=11), planned_end=NOW.replace(hour=14),
+    )
+    snap = _multistage_snapshot((press, blister))
+    event = ActualEndReported(
+        job_reference_id="J1", stage_id="press", actual_at=actual_at,
+    )
+
+    plan = plan_for_actual_end(snap, event, handoff_buffer_minutes=30)
+    written = {w.slot_id for w in plan.slot_writes}
+    assert "blister-1" not in written
+
+
+def test_baton_pass_skips_manually_placed_dependent():
+    """Manually-placed dependent stays put."""
+    actual_at = NOW.replace(hour=12)
+    press = _multistage_slot(
+        id_="press-1", stage_id="press",
+        status=SlotStatus.RUNNING, actual_start=NOW,
+        planned_end=NOW.replace(hour=11),
+    )
+    blister = _multistage_slot(
+        id_="blister-1", stage_id="blister",
+        planned_start=NOW.replace(hour=11), planned_end=NOW.replace(hour=14),
+        manually_placed=True,
+    )
+    snap = _multistage_snapshot((press, blister))
+    event = ActualEndReported(
+        job_reference_id="J1", stage_id="press", actual_at=actual_at,
+    )
+
+    plan = plan_for_actual_end(snap, event, handoff_buffer_minutes=30)
+    written = {w.slot_id for w in plan.slot_writes}
+    assert "blister-1" not in written
+
+
+def test_baton_pass_handles_dangling_recipe_gracefully():
+    """If the recipe pinned on the finishing slot isn't in the snapshot,
+    note the issue but don't crash — just stamp the press actual_end."""
+    actual_at = NOW.replace(hour=12)
+    press = _multistage_slot(
+        id_="press-1", stage_id="press",
+        status=SlotStatus.RUNNING, actual_start=NOW,
+        planned_end=NOW.replace(hour=11),
+    )
+    blister = _multistage_slot(
+        id_="blister-1", stage_id="blister",
+        planned_start=NOW.replace(hour=11), planned_end=NOW.replace(hour=14),
+    )
+    snap = Snapshot(
+        read_at=NOW, machines=(_machine(),), recipes=(), slots=(press, blister),
+    )
+    event = ActualEndReported(
+        job_reference_id="J1", stage_id="press", actual_at=actual_at,
+    )
+
+    plan = plan_for_actual_end(snap, event, handoff_buffer_minutes=30)
+    written = {w.slot_id for w in plan.slot_writes}
+    assert "press-1" in written
+    assert "blister-1" not in written
+    assert any("dangling recipe" in n for n in plan.notes)

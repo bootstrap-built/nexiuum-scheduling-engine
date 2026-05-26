@@ -213,6 +213,15 @@ class Settings(BaseSettings):
     # Phase 1: single tablet-press-standard recipe with one "press" stage.
     blend_status_pressing_label: str = "Pressing"
     blend_status_pressing_stage_id: str = "press"
+    # Phase 2C — when Blend Status flips to this label, the engine writes
+    # actual_end + Status=Done on the press slot AND adjusts dependent
+    # packaging slots' planned_start via the baton-pass.
+    blend_status_done_label: str = "Done"
+    # Min minutes between a finished press and the start of its dependent
+    # packaging stage. Used by baton-pass: if a press finishes at T, no
+    # dependent stage may be planned to start before T + handoff_buffer.
+    # 30 min mirrors the default changeover_minutes on Capacity Engine.
+    cross_stage_handoff_buffer_minutes: int = 30
 
     # ── Timezone ─────────────────────────────────────────────────────────
     factory_tz: str = "America/Denver"

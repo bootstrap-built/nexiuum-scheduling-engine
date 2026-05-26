@@ -181,6 +181,33 @@ def test_webhook_blend_records_pressing_enqueues_actual_start(client):
     assert enqueued.stage_id == "press"
 
 
+def test_webhook_blend_records_done_enqueues_actual_end(client):
+    """Phase 2C: Blend Status → Done fires an ActualEndReported event.
+    This drives both the press slot's actual_end stamp AND the baton-pass
+    to dependent packaging slots."""
+    payload = {
+        "event": {
+            "boardId": 18404836849,
+            "pulseId": 11801201557,
+            "type": "update_column_value",
+            "columnId": "color_mm1mb9cm",
+            "userId": "different-user-456",
+            "value": {"label": {"text": "Done", "index": 1}},
+            "changedAt": 1779879000,
+        }
+    }
+    with patch("engine.routes.webhook.enqueue_event", new_callable=AsyncMock) as mock_enq:
+        resp = client.post(WEBHOOK_PATH, json=payload)
+    assert resp.status_code == 200
+    assert resp.json()["kind"] == "actual_end_reported"
+    mock_enq.assert_awaited_once()
+    enqueued = mock_enq.await_args.args[0]
+    from engine.models import ActualEndReported
+    assert isinstance(enqueued, ActualEndReported)
+    assert enqueued.job_reference_id == "11801201557"
+    assert enqueued.stage_id == "press"
+
+
 def test_webhook_blend_records_pressing_falls_back_to_now_without_changed_at(client):
     """Without changedAt, the engine uses now() — still enqueues a valid event."""
     payload = {

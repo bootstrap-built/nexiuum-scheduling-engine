@@ -18,6 +18,7 @@ don't error.
 from __future__ import annotations
 
 import logging
+from datetime import timedelta
 from typing import Iterable
 
 from engine.models import (
@@ -88,16 +89,30 @@ def plan_for_actual_start(
 def plan_for_actual_end(
     snapshot: Snapshot,
     event: ActualEndReported,
+    *,
+    handoff_buffer_minutes: int = 30,
 ) -> Plan:
-    """Build a Plan that stamps actual_end + Status=Done on matching slots.
+    """Build a Plan that stamps actual_end + Status=Done on matching slots,
+    AND adjusts dependent-stage slots' planned_start so they respect the
+    actual finish time (Phase 2C baton-pass).
 
-    Symmetric to plan_for_actual_start. Empty Plan if no slot matches or
-    the slot is already Done. Idempotent on `actual_end` being None.
+    Behavior:
+    1. The finishing slot(s) get `actual_end` + `Status = Done`.
+    2. For each finishing slot, look up its recipe → find stages that
+       depend on this stage → find matching slots → push their
+       `planned_start` forward to `actual_at + handoff_buffer` if they
+       were planned earlier. Never pulls planned_start earlier (would
+       yank work into the past). Only touches dependent slots that
+       aren't already Running/Done/manually-placed — once a slot is in
+       flight or finished, the engine doesn't shove it around.
 
-    Phase 1 note: Blend Records has no clean "Pressed" signal yet — the
-    actual_end webhook source is TBD pending Jason/Zane input. This
-    function is wired for symmetry but not invoked from the webhook
-    layer until that's decided.
+    Empty Plan if no finishing slot matches or all are already finished.
+    Idempotent: dependent slots already planned at/after the handoff
+    cutoff are skipped.
+
+    `handoff_buffer_minutes` is the minimum separation between a stage
+    end and a dependent start. The caller (worker) reads this from
+    settings.cross_stage_handoff_buffer_minutes.
     """
     candidates = _matching_slots(snapshot.slots, event.job_reference_id, event.stage_id)
     if not candidates:
@@ -107,6 +122,8 @@ def plan_for_actual_end(
 
     writes: list[SlotWrite] = []
     notes: list[str] = []
+    handoff_at = event.actual_at + timedelta(minutes=handoff_buffer_minutes)
+
     for slot in candidates:
         if slot.actual_end is not None:
             notes.append(f"slot {slot.id} already has actual_end; skipping")
@@ -122,5 +139,76 @@ def plan_for_actual_end(
             )
         )
         notes.append(f"slot {slot.id}: actual_end + Status=Done")
+
+    # ── Baton-pass: find dependent slots and push their planned_start ───
+    # Look up the recipe pinned on the finishing slot. From there, find
+    # stage ids that list `event.stage_id` in their `depends_on`. Then
+    # find slots of those stages for the same job_reference_id and push
+    # their planned_start to `handoff_at` if currently earlier.
+    job_slots = [
+        s for s in snapshot.slots if s.job_reference_id == event.job_reference_id
+    ]
+    pinned_recipe_key: str | None = None
+    pinned_recipe_version: int | None = None
+    for slot in candidates:
+        if slot.recipe_key and slot.recipe_version is not None:
+            pinned_recipe_key = slot.recipe_key
+            pinned_recipe_version = slot.recipe_version
+            break
+
+    if pinned_recipe_key is not None and pinned_recipe_version is not None:
+        recipe = snapshot.recipe_by_composite_key(
+            pinned_recipe_key, pinned_recipe_version
+        )
+        if recipe is None:
+            notes.append(
+                f"recipe {pinned_recipe_key} v{pinned_recipe_version} not found in "
+                f"snapshot — baton-pass skipped (dangling recipe)"
+            )
+        else:
+            dependent_stage_ids = {
+                stage.id for stage in recipe.stages
+                if event.stage_id in stage.depends_on
+            }
+            for dep_slot in job_slots:
+                if dep_slot.stage_id not in dependent_stage_ids:
+                    continue
+                if dep_slot.is_immovable:
+                    notes.append(
+                        f"dependent slot {dep_slot.id} "
+                        f"(stage={dep_slot.stage_id}) is immovable "
+                        f"(running/done/manually placed) — skipping"
+                    )
+                    continue
+                current_start = dep_slot.planned_start
+                if current_start is not None and current_start >= handoff_at:
+                    notes.append(
+                        f"dependent slot {dep_slot.id} "
+                        f"(stage={dep_slot.stage_id}) already planned at/after "
+                        f"handoff ({current_start.isoformat()}) — no push needed"
+                    )
+                    continue
+                duration = (
+                    dep_slot.planned_end - dep_slot.planned_start
+                    if dep_slot.planned_start and dep_slot.planned_end
+                    else None
+                )
+                new_end = handoff_at + duration if duration else dep_slot.planned_end
+                writes.append(
+                    SlotWrite(
+                        slot_id=dep_slot.id,
+                        planned_start=handoff_at,
+                        planned_end=new_end,
+                    )
+                )
+                notes.append(
+                    f"baton-pass: slot {dep_slot.id} "
+                    f"(stage={dep_slot.stage_id}) planned_start pushed to "
+                    f"{handoff_at.isoformat()}"
+                )
+    elif candidates:
+        notes.append(
+            "finishing slots have no recipe pinning — baton-pass skipped"
+        )
 
     return Plan(slot_writes=tuple(writes), notes=tuple(notes))

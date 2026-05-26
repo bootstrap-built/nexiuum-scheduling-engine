@@ -119,7 +119,10 @@ async def process_event(event: Event) -> ApplyResult | None:
         return await _apply_or_noop(plan, label="ActualStartReported")
 
     if isinstance(event, ActualEndReported):
-        plan = plan_for_actual_end(snapshot, event)
+        plan = plan_for_actual_end(
+            snapshot, event,
+            handoff_buffer_minutes=s.cross_stage_handoff_buffer_minutes,
+        )
         return await _apply_or_noop(plan, label="ActualEndReported")
 
     if isinstance(event, DriftDetected):
