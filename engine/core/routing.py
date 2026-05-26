@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from engine.models import Machine, MachineStatus, ProcessGroup, ScheduleNewOrder, Snapshot
+from engine.models import Machine, ProcessGroup, ScheduleNewOrder, Snapshot
 
 
 def eligible_machines(
@@ -37,9 +37,15 @@ def eligible_machines(
     recipe's RecipeStage.machine_class). `order` carries the routing-relevant
     properties of the upstream order (dual_sided, active_mg, quantity); pass
     None to ignore order-specific hard rules (useful for diagnostic queries).
+
+    Machine eligibility uses `Machine.is_available` (Online + hours_per_day
+    > 0 + capacity_per_hour > 0) so machines that lack capacity numbers
+    (e.g., Nexiuum's VERIFY WITH MAKAYLA machines at provisioning time)
+    are excluded — protects downstream `quantity / capacity` math from
+    divide-by-zero. They re-enter routing the moment ops fills in Capacity.
     """
     in_group = [m for m in snapshot.machines if m.process_group == machine_class]
-    online = [m for m in in_group if m.status == MachineStatus.ONLINE and m.hours_per_day > 0]
+    online = [m for m in in_group if m.is_available]
 
     # ── Hard rule 1: dual-sided tablets → ONLY dual-sided machines ──
     if order is not None and order.dual_sided:

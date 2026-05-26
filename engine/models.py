@@ -81,7 +81,22 @@ class Machine:
 
     @property
     def is_available(self) -> bool:
-        return self.status == MachineStatus.ONLINE and self.hours_per_day > 0
+        """A machine is available for new placements when it is Online, has
+        nonzero daily hours, AND has nonzero per-hour capacity.
+
+        The capacity check protects the scheduler's `quantity / capacity`
+        duration math from divide-by-zero on machines whose capacity hasn't
+        been filled in yet (e.g., the Nexiuum machines flagged
+        VERIFY WITH MAKAYLA at provisioning time, which default to 0).
+        Such machines surface as "all_machines_down" in routing diagnostics
+        — semantically correct: they CAN'T do work until ops fills the
+        Capacity column.
+        """
+        return (
+            self.status == MachineStatus.ONLINE
+            and self.hours_per_day > 0
+            and self.capacity_per_hour > 0
+        )
 
 
 @dataclass(frozen=True)
