@@ -21,6 +21,7 @@ from engine.io.monday import MondayClient
 from engine.models import (
     Machine,
     MachineStatus,
+    MondayInstance,
     Priority,
     Recipe,
     RecipeStage,
@@ -143,7 +144,9 @@ def _mirror_text(cv: dict[str, Any] | None) -> str | None:
 # ─────────────────────────────────────────────────────────────────────────
 
 
-def _parse_machine(item: dict[str, Any], s: Settings) -> Machine:
+def _parse_machine(
+    item: dict[str, Any], s: Settings, instance: MondayInstance = "gray_space"
+) -> Machine:
     cv = _cv_by_id(item)
     status_text = _status_label(cv.get(s.col_cap_status))
     try:
@@ -178,10 +181,13 @@ def _parse_machine(item: dict[str, Any], s: Settings) -> Machine:
             _date_payload(cv.get(s.col_cap_last_job_ended_at)),
             s.factory_tz,
         ),
+        instance=instance,
     )
 
 
-def _parse_recipe(item: dict[str, Any], s: Settings) -> Recipe:
+def _parse_recipe(
+    item: dict[str, Any], s: Settings, instance: MondayInstance = "gray_space"
+) -> Recipe:
     cv = _cv_by_id(item)
     recipe_key = _text(cv.get(s.col_recipe_key)) or ""
     version = _int(cv.get(s.col_recipe_version)) or 1
@@ -229,6 +235,7 @@ def _parse_recipe(item: dict[str, Any], s: Settings) -> Recipe:
         version=version,
         status=status,
         stages=stages,
+        instance=instance,
     )
 
 
@@ -282,32 +289,67 @@ def _parse_slot(item: dict[str, Any], s: Settings) -> Slot:
 
 
 async def read_snapshot(client: MondayClient | None = None) -> Snapshot:
-    """Read all three boards and assemble a Snapshot.
+    """Read all engine-relevant boards and assemble a Snapshot.
 
-    Pass `client` if you already have an open MondayClient; otherwise this
-    opens a short-lived Gray Space client for the duration of the call.
+    Phase 1: reads Capacity Engine, Process Recipe, and Schedule from Gray
+    Space only.
+
+    Phase 2 (when `settings.nexiuum_enabled` is true): also reads Capacity
+    Engine + Process Recipe from the Nexiuum account via a second Monday
+    client. Schedule reads remain on Gray Space — that migration is a later
+    phase.
+
+    Each Machine and Recipe is tagged with the originating Monday
+    `instance` ("gray_space" | "nexiuum") so downstream code can route
+    writes back to the correct account.
+
+    Pass `client` if you already have an open Gray Space MondayClient;
+    otherwise this opens a short-lived one for the duration of the call.
+    When `client` is provided AND Nexiuum is enabled, a second short-lived
+    Nexiuum client is opened just for the Nexiuum-side reads.
     """
-    from engine.io.monday import MondayClient as _MC, gray_space_client  # noqa: PLC0415
+    from engine.io.monday import gray_space_client, nexiuum_client  # noqa: PLC0415
 
     s = get_settings()
 
-    async def _read_all(c: MondayClient) -> Snapshot:
+    async def _read_gray_space(c: MondayClient) -> tuple[
+        list[Machine], list[Recipe], list[Slot]
+    ]:
         machines_raw = await c.fetch_board_items(s.gray_space_capacity_engine_board)
         recipes_raw = await c.fetch_board_items(s.gray_space_process_recipe_board)
         slots_raw = await c.fetch_board_items(s.gray_space_schedule_board)
-
-        machines = tuple(_parse_machine(i, s) for i in machines_raw)
-        recipes = tuple(_parse_recipe(i, s) for i in recipes_raw)
-        slots = tuple(_parse_slot(i, s) for i in slots_raw)
-
-        return Snapshot(
-            read_at=now_local(s.factory_tz),
-            machines=machines,
-            recipes=recipes,
-            slots=slots,
+        return (
+            [_parse_machine(i, s, instance="gray_space") for i in machines_raw],
+            [_parse_recipe(i, s, instance="gray_space") for i in recipes_raw],
+            [_parse_slot(i, s) for i in slots_raw],
         )
 
+    async def _read_nexiuum(c: MondayClient) -> tuple[list[Machine], list[Recipe]]:
+        # Schedule board reads stay on Gray Space for now — see docstring.
+        machines_raw = await c.fetch_board_items(s.nexiuum_capacity_engine_board)
+        recipes_raw = await c.fetch_board_items(s.nexiuum_process_recipe_board)
+        return (
+            [_parse_machine(i, s, instance="nexiuum") for i in machines_raw],
+            [_parse_recipe(i, s, instance="nexiuum") for i in recipes_raw],
+        )
+
+    # ── Gray Space read ─────────────────────────────────────────────────
     if client is not None:
-        return await _read_all(client)
-    async with gray_space_client() as c:
-        return await _read_all(c)
+        gs_machines, gs_recipes, gs_slots = await _read_gray_space(client)
+    else:
+        async with gray_space_client() as c:
+            gs_machines, gs_recipes, gs_slots = await _read_gray_space(c)
+
+    # ── Nexiuum read (optional, Phase 2) ────────────────────────────────
+    nx_machines: list[Machine] = []
+    nx_recipes: list[Recipe] = []
+    if s.nexiuum_enabled:
+        async with nexiuum_client() as c:
+            nx_machines, nx_recipes = await _read_nexiuum(c)
+
+    return Snapshot(
+        read_at=now_local(s.factory_tz),
+        machines=tuple(gs_machines + nx_machines),
+        recipes=tuple(gs_recipes + nx_recipes),
+        slots=tuple(gs_slots),
+    )

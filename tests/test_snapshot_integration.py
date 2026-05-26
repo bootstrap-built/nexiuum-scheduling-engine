@@ -52,12 +52,11 @@ async def test_snapshot_read_routing_flags_present():
     assert by_name["Lancelot"].force_route_condition == "active_mg > 80"
 
 
-@pytest.mark.asyncio
-async def test_snapshot_read_merlin_is_down():
-    """Merlin was set Down for repair during 1.5B1 setup."""
-    snapshot = await read_snapshot()
-    merlin = next(m for m in snapshot.machines if m.name == "Merlin")
-    assert merlin.status == MachineStatus.DOWN
+# Removed `test_snapshot_read_merlin_is_down` 2026-05-25 — pinned to a
+# 1.5B1 snapshot when Merlin was Down for repair. Merlin's been back Online
+# since (verified via live API). MachineStatus.DOWN parsing is covered by
+# unit tests with fixtures; this integration test added nothing once live
+# state drifted.
 
 
 @pytest.mark.asyncio

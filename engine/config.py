@@ -6,7 +6,7 @@ All scheduling-relevant configuration lives here. Boards are referenced by ID
 
 from __future__ import annotations
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -34,6 +34,21 @@ class Settings(BaseSettings):
     gray_space_process_recipe_board: int = 18414126054
     gray_space_schedule_board: int = 18413802995
     gray_space_blend_records_board: int = 18404836849
+
+    # ── Monday board IDs (Phase 2: Nexiuum, optional) ────────────────────
+    # When all populated, the snapshot reader pulls Capacity Engine + Process
+    # Recipe from both accounts and merges them with an `instance` tag.
+    # Schedule board reads stay on Gray Space this phase — see plan §2.
+    # Default 0 means "unconfigured". The model validator below enforces
+    # all-or-nothing: either every Nexiuum field is set, or none of them are.
+    nexiuum_capacity_engine_board: int = Field(
+        0, alias="NEXIUUM_CAPACITY_ENGINE_BOARD",
+        description="Phase 2 — Nexiuum Capacity Engine board id (0 = unconfigured)",
+    )
+    nexiuum_process_recipe_board: int = Field(
+        0, alias="NEXIUUM_PROCESS_RECIPE_BOARD",
+        description="Phase 2 — Nexiuum Process Recipe board id (0 = unconfigured)",
+    )
 
     # ── Schedule board column IDs ────────────────────────────────────────
     # Captured from the board after creation. Hardcoded because Monday's API
@@ -138,6 +153,57 @@ class Settings(BaseSettings):
 
     # ── Monitoring (optional) ────────────────────────────────────────────
     sentry_dsn: str = ""
+
+    # ── Phase 2 validator: Nexiuum board IDs are all-or-nothing ──────────
+    @model_validator(mode="after")
+    def _validate_nexiuum_config(self) -> "Settings":
+        """Opt-in to Nexiuum dual-instance mode by setting board IDs.
+
+        Board IDs (not the token) are the opt-in signal because
+        `MONDAY_NEXIUUM_TOKEN` is sourced from `~/.monday_tokens` on Josh's
+        shell for many other tools — its presence in env is not a Phase 2
+        intent signal. Board IDs default to 0 (unset); any non-zero value
+        means "the operator deliberately configured Phase 2 reads."
+
+        Rules:
+        - If any Nexiuum board ID > 0, BOTH board IDs must be > 0 AND the
+          Nexiuum token must be non-empty (you can't read Nexiuum boards
+          without a token).
+        - If both board IDs are 0, the token is ignored (single-instance
+          Phase 1 mode regardless of token presence).
+        """
+        cap_set = self.nexiuum_capacity_engine_board > 0
+        rec_set = self.nexiuum_process_recipe_board > 0
+
+        # No opt-in: ignore token entirely.
+        if not cap_set and not rec_set:
+            return self
+
+        # Partial opt-in: one board set but not the other.
+        if cap_set != rec_set:
+            raise ValueError(
+                "Partial Nexiuum board config: "
+                f"NEXIUUM_CAPACITY_ENGINE_BOARD={'set' if cap_set else 'unset'}, "
+                f"NEXIUUM_PROCESS_RECIPE_BOARD={'set' if rec_set else 'unset'}. "
+                "Set both Nexiuum board IDs or leave both at 0."
+            )
+
+        # Both boards set but no token: can't read them.
+        if not self.nexiuum_monday_token:
+            raise ValueError(
+                "Nexiuum board IDs are set but MONDAY_NEXIUUM_TOKEN is empty. "
+                "Set the token to enable Phase 2 dual-instance reads."
+            )
+        return self
+
+    @property
+    def nexiuum_enabled(self) -> bool:
+        """True iff all Nexiuum-side config is populated."""
+        return (
+            bool(self.nexiuum_monday_token)
+            and self.nexiuum_capacity_engine_board > 0
+            and self.nexiuum_process_recipe_board > 0
+        )
 
 
 _settings: Settings | None = None

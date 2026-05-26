@@ -55,6 +55,9 @@ ProcessGroup = Literal[
 # ─────────────────────────────────────────────────────────────────────────
 
 
+MondayInstance = Literal["gray_space", "nexiuum"]
+
+
 @dataclass(frozen=True)
 class Machine:
     """One row of the Capacity Engine board."""
@@ -72,6 +75,9 @@ class Machine:
     max_job_size: int | None  # None = no cap
     force_route_condition: str | None  # free-text rule, engine parses
     last_job_ended_at: datetime | None  # local time
+    # Phase 2 — which Monday account this machine row came from. Default
+    # "gray_space" preserves Phase 1 behavior and existing test fixtures.
+    instance: MondayInstance = "gray_space"
 
     @property
     def is_available(self) -> bool:
@@ -97,6 +103,9 @@ class Recipe:
     version: int
     status: RecipeStatus
     stages: tuple[RecipeStage, ...]
+    # Phase 2 — which Monday account this recipe row came from. Default
+    # "gray_space" preserves Phase 1 behavior and existing test fixtures.
+    instance: MondayInstance = "gray_space"
 
     @property
     def composite_key(self) -> tuple[str, int]:
