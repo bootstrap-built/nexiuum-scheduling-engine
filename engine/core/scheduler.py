@@ -105,7 +105,7 @@ def plan_for_new_order(
     recipe = _resolve_recipe(snapshot, order)
     stages_in_topo_order = _topological_order(recipe)
     placements = _place_stages(snapshot, order, recipe, stages_in_topo_order, now=now)
-    slot_writes = _build_slot_writes(order, recipe, placements)
+    slot_writes = _build_slot_writes(order, recipe, placements, snapshot)
 
     notes = (
         f"order={order.job_reference_id} recipe={recipe.recipe_key} v{recipe.version} "
@@ -250,6 +250,7 @@ def _build_slot_writes(
     order: ScheduleNewOrder,
     recipe: Recipe,
     placements: list[_StagePlacement],
+    snapshot: Snapshot,
 ) -> list[SlotWrite]:
     writes: list[SlotWrite] = []
     for p in placements:
@@ -257,6 +258,10 @@ def _build_slot_writes(
         # so use `{job_ref} → {stage_id}` as a placeholder. IO shell rewrites
         # to the real machine name after resolving via the snapshot.
         placeholder_name = f"{order.job_reference_id} → {p.stage.id}"
+        # Phase 2: instance comes from the placed machine. IO shell routes
+        # each write to the correct Schedule board based on this.
+        machine = snapshot.machine_by_id(p.machine_id)
+        instance = machine.instance if machine else "gray_space"
         writes.append(
             SlotWrite(
                 slot_id=None,  # create
@@ -271,6 +276,7 @@ def _build_slot_writes(
                 planned_end=p.end,
                 status=SlotStatus.QUEUED,
                 manually_placed=False,
+                instance=instance,
             )
         )
 

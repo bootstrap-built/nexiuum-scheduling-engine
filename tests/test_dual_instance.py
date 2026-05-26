@@ -10,6 +10,7 @@ later schedule-migration phase doesn't accidentally regress.
 
 from __future__ import annotations
 
+import json
 import os
 from unittest.mock import AsyncMock, patch
 
@@ -362,6 +363,227 @@ async def test_snapshot_dual_instance_merges_capacity_engines(
 # ─────────────────────────────────────────────────────────────────────────
 # MondayClient — correct token per instance
 # ─────────────────────────────────────────────────────────────────────────
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# apply_plan — cross-instance write routing (Phase 2B Stage 3)
+# ─────────────────────────────────────────────────────────────────────────
+
+
+async def test_apply_plan_routes_nexiuum_writes_to_nexiuum_board(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A SlotWrite with instance='nexiuum' must be sent to the Nexiuum
+    Schedule board using Nexiuum column IDs via the Nexiuum client."""
+    from engine.io.apply import apply_plan
+    from engine.models import Plan, SlotStatus, SlotWrite
+
+    monkeypatch.setenv("MONDAY_GRAYSPACE_TOKEN", "gs-tok")
+    monkeypatch.setenv("MONDAY_NEXIUUM_TOKEN", "nx-tok")
+    monkeypatch.setenv("NEXIUUM_CAPACITY_ENGINE_BOARD", "111")
+    monkeypatch.setenv("NEXIUUM_PROCESS_RECIPE_BOARD", "222")
+    monkeypatch.setenv("NEXIUUM_SCHEDULE_BOARD", "12345")
+    reset_settings_for_tests()
+    s = get_settings()
+
+    captured: dict[str, list] = {"gs": [], "nx": []}
+
+    gs_client = AsyncMock(spec=MondayClient)
+    gs_client.__aenter__ = AsyncMock(return_value=gs_client)
+    gs_client.__aexit__ = AsyncMock(return_value=None)
+    async def gs_query(mutation, variables=None):
+        captured["gs"].append((mutation, variables))
+        return ({}, [])
+    gs_client.query_collecting_errors = AsyncMock(side_effect=gs_query)
+
+    nx_client = AsyncMock(spec=MondayClient)
+    nx_client.__aenter__ = AsyncMock(return_value=nx_client)
+    nx_client.__aexit__ = AsyncMock(return_value=None)
+    async def nx_query(mutation, variables=None):
+        captured["nx"].append((mutation, variables))
+        return ({"w0": {"id": "9999"}}, [])
+    nx_client.query_collecting_errors = AsyncMock(side_effect=nx_query)
+
+    plan = Plan(slot_writes=(
+        SlotWrite(
+            slot_id=None,
+            name="N1234 → Sachet-1",
+            machine_id="50001",
+            stage_id="sachet",
+            quantity=1000,
+            status=SlotStatus.QUEUED,
+            instance="nexiuum",
+        ),
+    ))
+
+    with (
+        patch("engine.io.apply.gray_space_client", return_value=gs_client),
+        patch("engine.io.apply.nexiuum_client", return_value=nx_client),
+    ):
+        result = await apply_plan(plan)
+
+    # Gray Space client never touched (no Gray Space writes in the plan)
+    assert captured["gs"] == []
+    # Nexiuum client got the mutation
+    assert len(captured["nx"]) == 1
+    mutation, variables = captured["nx"][0]
+    # Mutation targets the Nexiuum board id, not the Gray Space one
+    assert str(s.nexiuum_schedule_board) in mutation
+    assert str(s.gray_space_schedule_board) not in mutation
+    # column_values use Nexiuum column IDs (e.g., col_nx_schedule_quantity)
+    cv_json = json.loads(variables["cv_0"])
+    nx_cols = s.schedule_cols("nexiuum")
+    assert nx_cols.quantity in cv_json
+    assert nx_cols.status in cv_json
+    # And NOT Gray Space column IDs
+    gs_cols = s.schedule_cols("gray_space")
+    assert gs_cols.quantity != nx_cols.quantity  # sanity — they really differ
+    assert gs_cols.quantity not in cv_json
+    # Result reflects the Nexiuum-side create
+    assert result.created_slot_ids == ["9999"]
+    assert not result.errors
+
+
+async def test_apply_plan_splits_mixed_plan_gs_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A plan with writes for both instances fires two mutations, Gray
+    Space first (so press-stage IDs exist before packaging-stage dependency
+    backfills land in Phase 2C)."""
+    from engine.io.apply import apply_plan
+    from engine.models import Plan, SlotStatus, SlotWrite
+
+    monkeypatch.setenv("MONDAY_GRAYSPACE_TOKEN", "gs-tok")
+    monkeypatch.setenv("MONDAY_NEXIUUM_TOKEN", "nx-tok")
+    monkeypatch.setenv("NEXIUUM_CAPACITY_ENGINE_BOARD", "111")
+    monkeypatch.setenv("NEXIUUM_PROCESS_RECIPE_BOARD", "222")
+    monkeypatch.setenv("NEXIUUM_SCHEDULE_BOARD", "12345")
+    reset_settings_for_tests()
+
+    call_order: list[str] = []
+
+    gs_client = AsyncMock(spec=MondayClient)
+    gs_client.__aenter__ = AsyncMock(return_value=gs_client)
+    gs_client.__aexit__ = AsyncMock(return_value=None)
+    async def gs_query(mutation, variables=None):
+        call_order.append("gs")
+        return ({"w0": {"id": "press-slot-1"}}, [])
+    gs_client.query_collecting_errors = AsyncMock(side_effect=gs_query)
+
+    nx_client = AsyncMock(spec=MondayClient)
+    nx_client.__aenter__ = AsyncMock(return_value=nx_client)
+    nx_client.__aexit__ = AsyncMock(return_value=None)
+    async def nx_query(mutation, variables=None):
+        call_order.append("nx")
+        return ({"w1": {"id": "pack-slot-1"}}, [])
+    nx_client.query_collecting_errors = AsyncMock(side_effect=nx_query)
+
+    plan = Plan(slot_writes=(
+        SlotWrite(slot_id=None, name="GS", machine_id="1", quantity=100,
+                  status=SlotStatus.QUEUED, instance="gray_space"),
+        SlotWrite(slot_id=None, name="NX", machine_id="2", quantity=100,
+                  status=SlotStatus.QUEUED, instance="nexiuum"),
+    ))
+
+    with (
+        patch("engine.io.apply.gray_space_client", return_value=gs_client),
+        patch("engine.io.apply.nexiuum_client", return_value=nx_client),
+    ):
+        result = await apply_plan(plan)
+
+    # Gray Space fired before Nexiuum
+    assert call_order == ["gs", "nx"]
+    assert "press-slot-1" in result.created_slot_ids
+    assert "pack-slot-1" in result.created_slot_ids
+    assert not result.errors
+
+
+async def test_apply_plan_errors_when_nexiuum_writes_but_not_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If a plan contains Nexiuum writes but Nexiuum config is off, fail
+    loudly with a clear error rather than silently dropping the writes."""
+    from engine.io.apply import apply_plan
+    from engine.models import Plan, SlotStatus, SlotWrite
+
+    monkeypatch.setenv("MONDAY_NEXIUUM_TOKEN", "")
+    monkeypatch.delenv("NEXIUUM_CAPACITY_ENGINE_BOARD", raising=False)
+    monkeypatch.delenv("NEXIUUM_PROCESS_RECIPE_BOARD", raising=False)
+    monkeypatch.delenv("NEXIUUM_SCHEDULE_BOARD", raising=False)
+    reset_settings_for_tests()
+
+    plan = Plan(slot_writes=(
+        SlotWrite(slot_id=None, name="NX", machine_id="1", quantity=100,
+                  status=SlotStatus.QUEUED, instance="nexiuum"),
+    ))
+
+    result = await apply_plan(plan)
+    assert result.errors
+    assert "Nexiuum-instance writes but Nexiuum config is not enabled" in result.errors[0]
+    assert result.created_slot_ids == []
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Multi-stage scheduler — tags writes with the right instance
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def test_scheduler_tags_slot_writes_with_machine_instance() -> None:
+    """plan_for_new_order must propagate each placed machine's instance
+    onto the corresponding SlotWrite so apply_plan can route correctly."""
+    from datetime import datetime
+    from engine.core.scheduler import plan_for_new_order
+    from engine.models import (
+        Machine, MachineStatus, Recipe, RecipeStage, RecipeStatus,
+        ScheduleNewOrder, Snapshot,
+    )
+
+    tz_now = datetime(2026, 5, 25, 8, 0, 0)
+
+    gs_press = Machine(
+        id="gs1", name="Gandalf", process_group="Pressing",  # type: ignore[arg-type]
+        status=MachineStatus.ONLINE, capacity_per_hour=40000.0,
+        hours_per_day=16, working_window_start=6, working_window_end=22,
+        changeover_minutes=30, dual_sided_only=False, max_job_size=None,
+        force_route_condition=None, last_job_ended_at=None,
+        instance="gray_space",
+    )
+    nx_blister = Machine(
+        id="nx1", name="Blister-Fast-1", process_group="Blister",  # type: ignore[arg-type]
+        status=MachineStatus.ONLINE, capacity_per_hour=4000.0,
+        hours_per_day=16, working_window_start=6, working_window_end=22,
+        changeover_minutes=30, dual_sided_only=False, max_job_size=None,
+        force_route_condition=None, last_job_ended_at=None,
+        instance="nexiuum",
+    )
+    recipe = Recipe(
+        id="r1", name="press-then-blister",
+        recipe_key="press-then-blister", version=1, status=RecipeStatus.ACTIVE,
+        stages=(
+            RecipeStage(id="press", machine_class="Pressing", depends_on=()),  # type: ignore[arg-type]
+            RecipeStage(id="blister", machine_class="Blister", depends_on=("press",)),  # type: ignore[arg-type]
+        ),
+        instance="nexiuum",  # recipe lives on Nexiuum per Phase 2 addendum #8
+    )
+
+    snapshot = Snapshot(
+        read_at=tz_now, machines=(gs_press, nx_blister),
+        recipes=(recipe,), slots=(),
+    )
+    order = ScheduleNewOrder(
+        job_reference_id="job-1", recipe_key="press-then-blister",
+        recipe_version=1, quantity=10000,
+    )
+
+    plan = plan_for_new_order(snapshot, order, now=tz_now)
+
+    # Two stage writes, one per stage. Each tagged with the placed machine's instance.
+    assert len(plan.slot_writes) == 2
+    by_stage = {w.stage_id: w for w in plan.slot_writes}
+    assert by_stage["press"].instance == "gray_space"
+    assert by_stage["press"].machine_id == "gs1"
+    assert by_stage["blister"].instance == "nexiuum"
+    assert by_stage["blister"].machine_id == "nx1"
 
 
 async def test_monday_client_uses_correct_token_per_instance(

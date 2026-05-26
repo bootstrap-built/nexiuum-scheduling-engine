@@ -22,10 +22,10 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-from engine.config import Settings, get_settings
+from engine.config import ScheduleCols, Settings, get_settings
 from engine.core.timezone import local_to_monday
-from engine.io.monday import MondayClient, gray_space_client
-from engine.models import Plan, SlotWrite
+from engine.io.monday import MondayClient, gray_space_client, nexiuum_client
+from engine.models import MondayInstance, Plan, SlotWrite
 
 log = logging.getLogger(__name__)
 
@@ -66,10 +66,14 @@ class ApplyResult:
 
 def _build_column_values(
     write: SlotWrite,
+    cols: ScheduleCols,
     settings: Settings,
     reflow_hash: str,
 ) -> dict[str, Any]:
     """Convert a SlotWrite's non-None fields to a Monday column_values dict.
+
+    `cols` is the per-instance Schedule column map (so the same SlotWrite
+    can be serialized for either Gray Space or Nexiuum Schedule boards).
 
     `reflow_hash` overrides any caller-provided value — the apply_plan
     stamps every write with the same hash so the echo guard recognizes
@@ -80,95 +84,85 @@ def _build_column_values(
     cv: dict[str, Any] = {}
 
     if write.machine_id is not None:
-        cv[settings.col_schedule_machine] = {"item_ids": [int(write.machine_id)]}
+        cv[cols.machine] = {"item_ids": [int(write.machine_id)]}
 
     if write.job_reference_id is not None and write.job_reference_id != "__simulate__":
-        cv[settings.col_schedule_job_reference] = {"item_ids": [int(write.job_reference_id)]}
+        cv[cols.job_reference] = {"item_ids": [int(write.job_reference_id)]}
 
     if write.stage_id is not None:
-        cv[settings.col_schedule_stage_id] = write.stage_id
+        cv[cols.stage_id] = write.stage_id
 
     if write.recipe_key is not None:
-        cv[settings.col_schedule_recipe_key] = write.recipe_key
+        cv[cols.recipe_key] = write.recipe_key
 
     if write.recipe_version is not None:
-        cv[settings.col_schedule_recipe_version] = str(write.recipe_version)
+        cv[cols.recipe_version] = str(write.recipe_version)
 
     if write.quantity is not None:
-        cv[settings.col_schedule_quantity] = str(write.quantity)
+        cv[cols.quantity] = str(write.quantity)
 
     if write.planned_start is not None:
-        cv[settings.col_schedule_planned_start] = local_to_monday(
-            write.planned_start, settings.factory_tz
-        )
+        cv[cols.planned_start] = local_to_monday(write.planned_start, settings.factory_tz)
 
     if write.planned_end is not None:
-        cv[settings.col_schedule_planned_end] = local_to_monday(
-            write.planned_end, settings.factory_tz
-        )
+        cv[cols.planned_end] = local_to_monday(write.planned_end, settings.factory_tz)
 
     if write.actual_start is not None:
-        cv[settings.col_schedule_actual_start] = local_to_monday(
-            write.actual_start, settings.factory_tz
-        )
+        cv[cols.actual_start] = local_to_monday(write.actual_start, settings.factory_tz)
 
     if write.actual_end is not None:
-        cv[settings.col_schedule_actual_end] = local_to_monday(
-            write.actual_end, settings.factory_tz
-        )
+        cv[cols.actual_end] = local_to_monday(write.actual_end, settings.factory_tz)
 
     if write.dependent_on_ids is not None:
-        cv[settings.col_schedule_dependent_on] = {
-            "item_ids": [int(x) for x in write.dependent_on_ids]
-        }
+        cv[cols.dependent_on] = {"item_ids": [int(x) for x in write.dependent_on_ids]}
 
     if write.status is not None:
-        cv[settings.col_schedule_status] = {"label": write.status.value}
+        cv[cols.status] = {"label": write.status.value}
 
     if write.manually_placed is not None:
-        cv[settings.col_schedule_manually_placed] = {
+        cv[cols.manually_placed] = {
             "checked": "true" if write.manually_placed else "false"
         }
 
     if write.priority is not None:
-        cv[settings.col_schedule_priority] = {"label": write.priority.value}
+        cv[cols.priority] = {"label": write.priority.value}
 
     if write.drift_last_detected_at is not None:
-        cv[settings.col_schedule_drift_last_detected_at] = local_to_monday(
+        cv[cols.drift_last_detected_at] = local_to_monday(
             write.drift_last_detected_at, settings.factory_tz
         )
 
     # Echo-guard hash always present on engine writes.
-    cv[settings.col_schedule_last_reflow_hash] = reflow_hash
+    cv[cols.last_reflow_hash] = reflow_hash
 
     # Explicit field clearing — overrides any value set above.
     for field_name in write.fields_to_clear:
-        col_id = _slot_field_to_column_id(field_name, settings)
+        col_id = _slot_field_to_column_id(field_name, cols)
         if col_id is not None:
             cv[col_id] = None
 
     return cv
 
 
-def _slot_field_to_column_id(field_name: str, settings: Settings) -> str | None:
+def _slot_field_to_column_id(field_name: str, cols: ScheduleCols) -> str | None:
     """Map a SlotWrite attribute name to its Monday column ID. None if unmapped."""
     mapping = {
-        "machine_id": settings.col_schedule_machine,
-        "job_reference_id": settings.col_schedule_job_reference,
-        "stage_id": settings.col_schedule_stage_id,
-        "recipe_key": settings.col_schedule_recipe_key,
-        "recipe_version": settings.col_schedule_recipe_version,
-        "quantity": settings.col_schedule_quantity,
-        "planned_start": settings.col_schedule_planned_start,
-        "planned_end": settings.col_schedule_planned_end,
-        "actual_start": settings.col_schedule_actual_start,
-        "actual_end": settings.col_schedule_actual_end,
-        "dependent_on_ids": settings.col_schedule_dependent_on,
-        "status": settings.col_schedule_status,
-        "manually_placed": settings.col_schedule_manually_placed,
-        "priority": settings.col_schedule_priority,
-        "last_reflow_hash": settings.col_schedule_last_reflow_hash,
-        "drift_last_detected_at": settings.col_schedule_drift_last_detected_at,
+        "machine_id": cols.machine,
+        "job_reference_id": cols.job_reference,
+        "stage_id": cols.stage_id,
+        "recipe_key": cols.recipe_key,
+        "recipe_version": cols.recipe_version,
+        "quantity": cols.quantity,
+        "planned_start": cols.planned_start,
+        "planned_end": cols.planned_end,
+        "actual_start": cols.actual_start,
+        "actual_end": cols.actual_end,
+        "dependent_on_ids": cols.dependent_on,
+        "status": cols.status,
+        "manually_placed": cols.manually_placed,
+        "priority": cols.priority,
+        "last_reflow_hash": cols.last_reflow_hash,
+        "drift_last_detected_at": cols.drift_last_detected_at,
     }
     return mapping.get(field_name)
 
@@ -178,32 +172,37 @@ def _slot_field_to_column_id(field_name: str, settings: Settings) -> str | None:
 # ─────────────────────────────────────────────────────────────────────────
 
 
-def _build_batched_mutation(
-    plan: Plan,
+def _build_batched_mutation_for_instance(
+    indexed_writes: list[tuple[int, SlotWrite]],
+    board_id: int,
+    cols: ScheduleCols,
     settings: Settings,
     reflow_hash: str,
 ) -> tuple[str, dict[str, Any], list[tuple[int, str]]]:
-    """Build one GraphQL mutation that creates and/or updates all slots.
+    """Build one GraphQL mutation for one instance's Schedule board.
+
+    `indexed_writes` is a list of (original_plan_index, write) pairs — the
+    plan index is preserved across instance splits so the caller can map
+    aliases back to the input Plan in stable order.
 
     Returns (mutation_string, variables, aliases) where `aliases` is a list
-    of (plan_index, alias_name) pairs so the caller can correlate response
-    fields back to the input Plan order.
+    of (plan_index, alias_name) pairs.
     """
     pieces: list[str] = []
     variables: dict[str, Any] = {}
     aliases: list[tuple[int, str]] = []
-    board_id_str = str(settings.gray_space_schedule_board)
+    board_id_str = str(board_id)
 
-    for idx, write in enumerate(plan.slot_writes):
-        alias = f"w{idx}"
-        cv = _build_column_values(write, settings, reflow_hash)
-        cv_var = f"cv_{idx}"
+    for plan_idx, write in indexed_writes:
+        alias = f"w{plan_idx}"
+        cv = _build_column_values(write, cols, settings, reflow_hash)
+        cv_var = f"cv_{plan_idx}"
         variables[cv_var] = json.dumps(cv)
 
         if write.slot_id is None:
             # Create
-            name_var = f"name_{idx}"
-            variables[name_var] = write.name or f"slot-{idx}"
+            name_var = f"name_{plan_idx}"
+            variables[name_var] = write.name or f"slot-{plan_idx}"
             pieces.append(
                 f"{alias}: create_item("
                 f"board_id: {board_id_str}, "
@@ -211,11 +210,10 @@ def _build_batched_mutation(
                 f"column_values: ${cv_var}"
                 f") {{ id }}"
             )
-            variables[f"_name_{idx}_type"] = None  # placeholder; types below
-            aliases.append((idx, alias))
+            aliases.append((plan_idx, alias))
         else:
             # Update
-            item_var = f"item_{idx}"
+            item_var = f"item_{plan_idx}"
             variables[item_var] = str(write.slot_id)
             pieces.append(
                 f"{alias}: change_multiple_column_values("
@@ -224,20 +222,18 @@ def _build_batched_mutation(
                 f"column_values: ${cv_var}"
                 f") {{ id }}"
             )
-            aliases.append((idx, alias))
+            aliases.append((plan_idx, alias))
 
     if not pieces:
         return "", {}, []
 
-    # Strip the placeholder _name_<idx>_type entries (unused; left in dict
-    # to keep the loop tidy above).
-    variables = {k: v for k, v in variables.items() if not k.startswith("_")}
-
     # Build the GraphQL variable declarations.
     var_decls: list[str] = []
     for k in variables:
-        if k.startswith("cv_") or k.startswith("name_"):
-            var_decls.append(f"${k}: JSON!" if k.startswith("cv_") else f"${k}: String!")
+        if k.startswith("cv_"):
+            var_decls.append(f"${k}: JSON!")
+        elif k.startswith("name_"):
+            var_decls.append(f"${k}: String!")
         elif k.startswith("item_"):
             var_decls.append(f"${k}: ID!")
 
@@ -259,13 +255,22 @@ async def apply_plan(
 ) -> ApplyResult:
     """Execute a Plan against Monday.
 
-    All slot_writes are sent in one batched GraphQL mutation. Each write is
-    stamped with `last_reflow_hash` so the echo guard can recognize
-    engine-originated changes when their `Schedule item modified` webhook
-    bounces back.
+    Phase 2: writes are grouped by `SlotWrite.instance` and dispatched as
+    one batched mutation per instance against that instance's Schedule
+    board using that instance's Monday client. Both instances use the same
+    `reflow_hash` so the echo guard recognizes engine-originated changes
+    on either side.
 
-    If `client` is None, a short-lived Gray Space client is opened for the
-    duration of the call.
+    If `client` is passed, it's used for Gray Space writes (legacy callers
+    that already have an open Gray Space client). Nexiuum writes always
+    open their own short-lived client. If `client` is None, both instances
+    open short-lived clients.
+
+    Per-instance mutations execute SEQUENTIALLY (Gray Space first, then
+    Nexiuum) so press-stage slot IDs exist by the time packaging-stage
+    writes need them in `dependent_on_ids`. Phase 2B doesn't yet do that
+    backfill — that's task #10 (baton-pass wiring) — but the ordering
+    invariant is in place now so the wiring stays trivial.
     """
     s = settings or get_settings()
     rh = reflow_hash or uuid.uuid4().hex
@@ -283,19 +288,99 @@ async def apply_plan(
     if not plan.slot_writes:
         return ApplyResult(reflow_hash=rh)
 
-    mutation, variables, aliases = _build_batched_mutation(plan, s, rh)
+    # ── Group writes by instance, preserving original plan order ────────
+    by_instance: dict[MondayInstance, list[tuple[int, SlotWrite]]] = {
+        "gray_space": [],
+        "nexiuum": [],
+    }
+    for idx, write in enumerate(plan.slot_writes):
+        by_instance[write.instance].append((idx, write))
+
+    # Pre-flight: if any writes target Nexiuum, dual-instance must be configured.
+    if by_instance["nexiuum"] and not s.nexiuum_enabled:
+        return ApplyResult(
+            reflow_hash=rh,
+            errors=[
+                f"Plan has {len(by_instance['nexiuum'])} Nexiuum-instance "
+                f"writes but Nexiuum config is not enabled (set "
+                f"MONDAY_NEXIUUM_TOKEN + 3 board IDs)."
+            ],
+        )
+
+    aggregate = ApplyResult(reflow_hash=rh)
+
+    # ── Gray Space writes ───────────────────────────────────────────────
+    if by_instance["gray_space"]:
+        result = await _apply_for_instance(
+            indexed_writes=by_instance["gray_space"],
+            instance="gray_space",
+            plan=plan,
+            settings=s,
+            reflow_hash=rh,
+            client_override=client,
+        )
+        aggregate = _merge_results(aggregate, result)
+
+    # ── Nexiuum writes (sequential after Gray Space) ────────────────────
+    if by_instance["nexiuum"]:
+        result = await _apply_for_instance(
+            indexed_writes=by_instance["nexiuum"],
+            instance="nexiuum",
+            plan=plan,
+            settings=s,
+            reflow_hash=rh,
+            client_override=None,  # Nexiuum always opens its own client
+        )
+        aggregate = _merge_results(aggregate, result)
+
+    if aggregate.errors:
+        log.error(
+            "apply_plan partial/full failure across instances: "
+            "created=%d updated=%d errors=%d reflow_hash=%s",
+            len(aggregate.created_slot_ids),
+            len(aggregate.updated_slot_ids),
+            len(aggregate.errors), rh,
+        )
+
+    return aggregate
+
+
+async def _apply_for_instance(
+    *,
+    indexed_writes: list[tuple[int, SlotWrite]],
+    instance: MondayInstance,
+    plan: Plan,
+    settings: Settings,
+    reflow_hash: str,
+    client_override: MondayClient | None,
+) -> ApplyResult:
+    """Build and execute one batched mutation against the given instance."""
+    cols = settings.schedule_cols(instance)
+    board_id = settings.schedule_board(instance)
+    if board_id <= 0:
+        return ApplyResult(
+            reflow_hash=reflow_hash,
+            errors=[
+                f"{instance} Schedule board id is 0 — board not configured."
+            ],
+        )
+
+    mutation, variables, aliases = _build_batched_mutation_for_instance(
+        indexed_writes, board_id, cols, settings, reflow_hash,
+    )
 
     async def _run(c: MondayClient) -> ApplyResult:
         try:
             data, gql_errors = await c.query_collecting_errors(mutation, variables=variables)
         except Exception as e:
-            log.exception("apply_plan transport failure")
-            return ApplyResult(reflow_hash=rh, errors=[f"GraphQL transport error: {e}"])
+            log.exception("apply_plan transport failure (%s)", instance)
+            return ApplyResult(
+                reflow_hash=reflow_hash,
+                errors=[f"{instance} GraphQL transport error: {e}"],
+            )
 
-        # Index GraphQL errors by the alias they apply to. Monday returns a
-        # `path` array; the first element is the alias for aliased mutations.
         errors_by_alias: dict[str, list[str]] = {}
-        unrouted_errors: list[str] = []  # errors with no parseable alias path
+        unrouted_errors: list[str] = []
         for err in gql_errors:
             msg = err.get("message", "Monday returned an unspecified error")
             path = err.get("path") or []
@@ -317,18 +402,13 @@ async def apply_plan(
                     created.append(slot_id)
                 else:
                     updated.append(slot_id)
-                # Defensive: Monday could theoretically return both an id and
-                # an error for the same alias. Surface that so it's visible.
                 if alias_errors:
                     errors.append(
-                        f"slot index {idx} (alias {alias}) wrote id={slot_id} "
-                        f"but Monday also returned errors: {'; '.join(alias_errors)}"
+                        f"[{instance}] slot index {idx} (alias {alias}) "
+                        f"wrote id={slot_id} but Monday also returned errors: "
+                        f"{'; '.join(alias_errors)}"
                     )
             else:
-                # Missing or null payload — this write did not land in Monday.
-                # Per Monday's batched-mutation semantics, earlier aliases in
-                # the same query may have already succeeded; their reflow_hash
-                # is already stamped. No rollback — operator reconciles.
                 target = (
                     f"create (job={write.job_reference_id})"
                     if write.slot_id is None
@@ -338,30 +418,35 @@ async def apply_plan(
                     "no id returned and no per-alias error from Monday"
                 )
                 errors.append(
-                    f"slot index {idx} (alias {alias}) {target} failed: {detail}"
+                    f"[{instance}] slot index {idx} (alias {alias}) "
+                    f"{target} failed: {detail}"
                 )
 
-        # Top-level errors with no alias path apply to the whole batch.
         for msg in unrouted_errors:
-            errors.append(f"batch-level error: {msg}")
-
-        if errors:
-            log.error(
-                "apply_plan partial/full failure: "
-                "created=%d updated=%d failed=%d reflow_hash=%s",
-                len(created), len(updated),
-                len(aliases) - len(created) - len(updated),
-                rh,
-            )
+            errors.append(f"[{instance}] batch-level error: {msg}")
 
         return ApplyResult(
             created_slot_ids=created,
             updated_slot_ids=updated,
-            reflow_hash=rh,
+            reflow_hash=reflow_hash,
             errors=errors,
         )
 
-    if client is not None:
-        return await _run(client)
-    async with gray_space_client() as c:
+    # Use override if given AND the instance matches Gray Space (the legacy
+    # caller path). Otherwise open a fresh client of the right flavor.
+    if client_override is not None and instance == "gray_space":
+        return await _run(client_override)
+
+    client_factory = nexiuum_client if instance == "nexiuum" else gray_space_client
+    async with client_factory() as c:
         return await _run(c)
+
+
+def _merge_results(a: ApplyResult, b: ApplyResult) -> ApplyResult:
+    """Concatenate two per-instance ApplyResults. reflow_hash assumed equal."""
+    return ApplyResult(
+        created_slot_ids=a.created_slot_ids + b.created_slot_ids,
+        updated_slot_ids=a.updated_slot_ids + b.updated_slot_ids,
+        reflow_hash=a.reflow_hash,
+        errors=a.errors + b.errors,
+    )

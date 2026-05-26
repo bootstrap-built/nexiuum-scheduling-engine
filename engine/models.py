@@ -301,6 +301,10 @@ class SlotWrite:
     last_reflow_hash: str | None = None
     drift_last_detected_at: datetime | None = None
     fields_to_clear: frozenset[str] = field(default_factory=frozenset)
+    # Phase 2: which instance owns the target Schedule board for this write.
+    # Pure-core sets this based on the placed machine's instance. IO shell
+    # routes each write to the right Schedule board + Monday client.
+    instance: MondayInstance = "gray_space"
 
 
 @dataclass(frozen=True)

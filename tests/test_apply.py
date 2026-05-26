@@ -13,11 +13,33 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from engine.config import get_settings
-from engine.io.apply import _build_batched_mutation, _build_column_values
+from engine.io.apply import (
+    _build_batched_mutation_for_instance,
+    _build_column_values,
+)
 from engine.models import Plan, Priority, SlotStatus, SlotWrite
 
 TZ = ZoneInfo("America/Denver")
 SETTINGS = get_settings()
+GS_COLS = SETTINGS.schedule_cols("gray_space")
+
+
+def _build_cv(write, settings, reflow_hash):
+    """Test helper — apply.py's _build_column_values for Gray Space."""
+    return _build_column_values(
+        write, settings.schedule_cols("gray_space"), settings, reflow_hash
+    )
+
+
+def _build_mut(plan, settings, reflow_hash):
+    """Test helper — apply.py's batched mutation builder for Gray Space."""
+    return _build_batched_mutation_for_instance(
+        list(enumerate(plan.slot_writes)),
+        settings.gray_space_schedule_board,
+        settings.schedule_cols("gray_space"),
+        settings,
+        reflow_hash,
+    )
 
 
 # ─── Column value serializer ─────────────────────────────────────────────
@@ -40,7 +62,7 @@ def test_column_values_create_slot_full_payload():
         priority=Priority.NORMAL,
         manually_placed=False,
     )
-    cv = _build_column_values(w, SETTINGS, "abc123")
+    cv = _build_cv(w, SETTINGS, "abc123")
 
     # Machine + job ref are board_relation columns: {"item_ids": [N]}
     assert cv[SETTINGS.col_schedule_machine] == {"item_ids": [12047953695]}
@@ -79,14 +101,14 @@ def test_column_values_skips_simulate_job_id():
         machine_id="12047953695",
         quantity=100,
     )
-    cv = _build_column_values(w, SETTINGS, "h1")
+    cv = _build_cv(w, SETTINGS, "h1")
     assert SETTINGS.col_schedule_job_reference not in cv
 
 
 def test_column_values_skips_none_fields():
     """None-valued fields are omitted from the column_values dict."""
     w = SlotWrite(slot_id="X", machine_id="12047953695")
-    cv = _build_column_values(w, SETTINGS, "h1")
+    cv = _build_cv(w, SETTINGS, "h1")
     # Only machine + reflow hash; everything else omitted.
     assert set(cv.keys()) == {
         SETTINGS.col_schedule_machine,
@@ -100,7 +122,7 @@ def test_column_values_fields_to_clear_emits_null():
         slot_id="X",
         fields_to_clear=frozenset({"actual_start", "actual_end"}),
     )
-    cv = _build_column_values(w, SETTINGS, "h1")
+    cv = _build_cv(w, SETTINGS, "h1")
     assert cv[SETTINGS.col_schedule_actual_start] is None
     assert cv[SETTINGS.col_schedule_actual_end] is None
 
@@ -112,7 +134,7 @@ def test_column_values_fields_to_clear_overrides_set_value():
         actual_start=datetime(2026, 5, 21, 8, 0, 0, tzinfo=TZ),
         fields_to_clear=frozenset({"actual_start"}),
     )
-    cv = _build_column_values(w, SETTINGS, "h1")
+    cv = _build_cv(w, SETTINGS, "h1")
     assert cv[SETTINGS.col_schedule_actual_start] is None
 
 
@@ -121,7 +143,7 @@ def test_column_values_fields_to_clear_overrides_set_value():
 
 def test_mutation_builder_creates_aliased_create_for_new_slot():
     plan = Plan(slot_writes=(SlotWrite(slot_id=None, machine_id="12047953695", name="X"),))
-    mutation, vars_, aliases = _build_batched_mutation(plan, SETTINGS, "h1")
+    mutation, vars_, aliases = _build_mut(plan, SETTINGS, "h1")
     assert "create_item" in mutation
     assert "w0:" in mutation
     assert aliases == [(0, "w0")]
@@ -131,7 +153,7 @@ def test_mutation_builder_creates_aliased_create_for_new_slot():
 
 def test_mutation_builder_creates_aliased_update_for_existing_slot():
     plan = Plan(slot_writes=(SlotWrite(slot_id="12000", machine_id="12047953695"),))
-    mutation, vars_, aliases = _build_batched_mutation(plan, SETTINGS, "h1")
+    mutation, vars_, aliases = _build_mut(plan, SETTINGS, "h1")
     assert "change_multiple_column_values" in mutation
     assert aliases == [(0, "w0")]
     assert vars_["item_0"] == "12000"
@@ -145,14 +167,14 @@ def test_mutation_builder_mixed_creates_and_updates():
             SlotWrite(slot_id=None, machine_id="12047930644", name="new2"),
         )
     )
-    mutation, vars_, aliases = _build_batched_mutation(plan, SETTINGS, "h1")
+    mutation, vars_, aliases = _build_mut(plan, SETTINGS, "h1")
     assert aliases == [(0, "w0"), (1, "w1"), (2, "w2")]
     assert "w0:" in mutation and "w1:" in mutation and "w2:" in mutation
 
 
 def test_mutation_builder_empty_plan_returns_empty():
     plan = Plan(slot_writes=())
-    mutation, vars_, aliases = _build_batched_mutation(plan, SETTINGS, "h1")
+    mutation, vars_, aliases = _build_mut(plan, SETTINGS, "h1")
     assert mutation == ""
     assert vars_ == {}
     assert aliases == []
@@ -171,7 +193,7 @@ def test_mutation_cv_var_is_valid_json():
             ),
         )
     )
-    _, vars_, _ = _build_batched_mutation(plan, SETTINGS, "h1")
+    _, vars_, _ = _build_mut(plan, SETTINGS, "h1")
     parsed = json.loads(vars_["cv_0"])
     assert parsed[SETTINGS.col_schedule_machine] == {"item_ids": [12047953695]}
     assert parsed[SETTINGS.col_schedule_status] == {"label": "Queued"}
