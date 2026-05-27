@@ -329,6 +329,27 @@ class DriftDetected:
     kind: Literal["late_start", "late_end"]
 
 
+@dataclass(frozen=True)
+class SpecSheetItemReady:
+    """Event: a Production Schedule item is ready for the engine to schedule.
+
+    Phase 2D — fires when a Monday automation (or operator) signals that
+    the spec sheet form's output is complete and the engine should now
+    read the `Spec Sheet Payload` JSON, derive a recipe + breakdown, and
+    schedule the slots.
+
+    `item_id` is the Production Schedule item ID (board 8196668916). The
+    engine uses this as the `job_reference_id` on every slot it creates,
+    so the Schedule boards' Job Reference connect columns point straight
+    back at the originating order. (Earlier Phase 2B workaround had to
+    strip job_reference_id for Nexiuum slots — that's no longer needed
+    because the Nexiuum Schedule's Job Reference column connects to
+    Production Schedule, which IS this item.)
+    """
+
+    item_id: str
+
+
 Event = (
     ScheduleNewOrder
     | CapacityChanged
@@ -337,6 +358,7 @@ Event = (
     | ManualReschedule
     | ExpediteRequested
     | DriftDetected
+    | SpecSheetItemReady
 )
 
 

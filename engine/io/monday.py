@@ -217,6 +217,56 @@ class MondayClient:
         return result
 
 
+    async def fetch_item(
+        self, item_id: str, *, column_ids: list[str] | None = None,
+    ) -> dict[str, Any] | None:
+        """Fetch a single item by ID with selected column values.
+
+        Returns `None` when the item doesn't exist or the API surfaces no
+        item (e.g., the engine's token can't see the board). The caller
+        decides whether that's an error.
+
+        `column_ids` filter narrows the response payload to just the
+        columns the caller needs — Production Schedule items have a lot
+        of columns and the engine only reads `Spec Sheet Payload` plus a
+        few status fields.
+        """
+        if column_ids:
+            query = """
+            query ($items: [ID!]!, $cols: [String!]) {
+              items(ids: $items) {
+                id
+                name
+                column_values(ids: $cols) {
+                  id
+                  text
+                  value
+                }
+              }
+            }
+            """
+            data = await self.query(
+                query, {"items": [item_id], "cols": column_ids},
+            )
+        else:
+            query = """
+            query ($items: [ID!]!) {
+              items(ids: $items) {
+                id
+                name
+                column_values {
+                  id
+                  text
+                  value
+                }
+              }
+            }
+            """
+            data = await self.query(query, {"items": [item_id]})
+        items = data.get("items") or []
+        return items[0] if items else None
+
+
 # ── Convenience factories ───────────────────────────────────────────────
 
 

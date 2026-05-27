@@ -373,3 +373,112 @@ async def test_stop_worker_drains_pending_submissions():
         for t in (t1, t2):
             with pytest.raises((asyncio.CancelledError, BaseException)):
                 await asyncio.wait_for(t, timeout=1.0)
+
+
+# ─── Phase 2D — SpecSheetItemReady ───────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_process_event_spec_sheet_item_ready_schedules():
+    """SpecSheetItemReady → reads payload → builds order → applies plan."""
+    import json as _json
+    from engine.models import SpecSheetItemReady
+
+    payload = {
+        "product_type": "Tablets",
+        "tablet_size": "12mm Bisect",
+        "is_dual": False,
+        "manufacturing_route": "Manufacturing + Packaging",
+        "actives": [{"name": "Caffeine", "mg": 200}],
+        "packaging_type": "Blister",
+        "flavors": [
+            {"flavor": "Strawberry", "qty": 80_000, "packaging_breakdown": []}
+        ],
+        "flavor_index": 0,
+    }
+    fake_result = ApplyResult(created_slot_ids=["new-1"], reflow_hash="h")
+
+    with (
+        patch("engine.io.worker.read_snapshot", new_callable=AsyncMock) as mock_snap,
+        patch("engine.io.worker.apply_plan", new_callable=AsyncMock) as mock_apply,
+        patch("engine.io.worker.now_local", return_value=NOW),
+        patch(
+            "engine.io.worker.read_spec_sheet_payload_for_item",
+            new_callable=AsyncMock,
+        ) as mock_read,
+    ):
+        mock_snap.return_value = _fake_snapshot()
+        mock_apply.return_value = fake_result
+        mock_read.return_value = _json.dumps(payload)
+
+        result = await process_event(SpecSheetItemReady(item_id="ps-42"))
+
+    assert result is fake_result
+    mock_read.assert_awaited_once_with("ps-42")
+    mock_apply.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_process_event_spec_sheet_samples_route_skipped():
+    """Manufacturing route 'Samples' → no apply, returns None."""
+    import json as _json
+    from engine.models import SpecSheetItemReady
+
+    payload = {
+        "product_type": "Tablets",
+        "tablet_size": "12mm",
+        "manufacturing_route": "Samples",
+        "actives": [{"name": "X", "mg": 100}],
+        "packaging_type": "Blister",
+        "flavors": [{"flavor": "Test", "qty": 1000, "packaging_breakdown": []}],
+        "flavor_index": 0,
+    }
+    with (
+        patch("engine.io.worker.read_snapshot", new_callable=AsyncMock) as mock_snap,
+        patch("engine.io.worker.apply_plan", new_callable=AsyncMock) as mock_apply,
+        patch("engine.io.worker.now_local", return_value=NOW),
+        patch(
+            "engine.io.worker.read_spec_sheet_payload_for_item",
+            new_callable=AsyncMock,
+        ) as mock_read,
+    ):
+        mock_snap.return_value = _fake_snapshot()
+        mock_read.return_value = _json.dumps(payload)
+
+        result = await process_event(SpecSheetItemReady(item_id="ps-43"))
+
+    assert result is None
+    mock_apply.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_process_event_spec_sheet_unsupported_product_logged_no_raise():
+    """Capsules etc. → log warning + return None, don't fail the worker."""
+    import json as _json
+    from engine.models import SpecSheetItemReady
+
+    payload = {
+        "product_type": "Capsules",
+        "capsule_size": "0",
+        "manufacturing_route": "Manufacturing + Packaging",
+        "actives": [{"name": "X", "mg": 100}],
+        "packaging_type": "Blister",
+        "flavors": [{"flavor": "Test", "qty": 1000, "packaging_breakdown": []}],
+        "flavor_index": 0,
+    }
+    with (
+        patch("engine.io.worker.read_snapshot", new_callable=AsyncMock) as mock_snap,
+        patch("engine.io.worker.apply_plan", new_callable=AsyncMock) as mock_apply,
+        patch("engine.io.worker.now_local", return_value=NOW),
+        patch(
+            "engine.io.worker.read_spec_sheet_payload_for_item",
+            new_callable=AsyncMock,
+        ) as mock_read,
+    ):
+        mock_snap.return_value = _fake_snapshot()
+        mock_read.return_value = _json.dumps(payload)
+
+        result = await process_event(SpecSheetItemReady(item_id="ps-44"))
+
+    assert result is None
+    mock_apply.assert_not_called()

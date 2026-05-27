@@ -111,6 +111,19 @@ class Settings(BaseSettings):
         "Slots for packaging stages get written here per Option B (2 boards, "
         "unified Marey view via /schedule.json).",
     )
+    # Phase 2D — Production Schedule board on the Nexiuum instance. Holds
+    # the form's per-flavor items + the Spec Sheet Payload long-text
+    # column the engine reads. READ-ONLY for the engine (locked decision
+    # — only the spec sheet form writes here). Default is the live board
+    # ID so the env override is just for non-prod tests.
+    nexiuum_production_schedule_board: int = Field(
+        8196668916, alias="NEXIUUM_PRODUCTION_SCHEDULE_BOARD",
+        description="Phase 2D — Nexiuum Production Schedule board id. "
+        "Engine reads Spec Sheet Payload from here; NEVER writes.",
+    )
+    # Spec Sheet Payload long-text column on Production Schedule. Holds
+    # the form's canonical structured submission JSON per item.
+    col_ps_spec_sheet_payload: str = "long_text_mm3bbhcv"
 
     # ── Schedule board column IDs (Gray Space — Phase 1) ─────────────────
     # Captured from the board after creation. Hardcoded because Monday's API

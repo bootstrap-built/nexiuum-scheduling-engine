@@ -48,7 +48,12 @@ from engine.config import get_settings
 from engine.core.timezone import now_local
 from engine.io.engine_identity import get_engine_user_id
 from engine.io.worker import WorkerNotRunning, enqueue_event
-from engine.models import ActualEndReported, ActualStartReported, CapacityChanged
+from engine.models import (
+    ActualEndReported,
+    ActualStartReported,
+    CapacityChanged,
+    SpecSheetItemReady,
+)
 
 router = APIRouter(tags=["webhook"])
 log = logging.getLogger(__name__)
@@ -202,3 +207,91 @@ def _resolve_actual_at(event: dict[str, Any], factory_tz: str):
         from zoneinfo import ZoneInfo
         return datetime.fromtimestamp(float(changed_at), tz=timezone.utc).astimezone(ZoneInfo(factory_tz))
     return now_local(factory_tz)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Phase 2D — Spec Sheet item ready trigger
+# ─────────────────────────────────────────────────────────────────────────
+
+
+@router.post("/webhook/monday/spec-sheet/{secret}")
+async def webhook_monday_spec_sheet(secret: str, request: Request) -> dict[str, Any]:
+    """Phase 2D — receive a "schedule this Production Schedule item" trigger.
+
+    Wired up as a Monday automation HTTP webhook on the Production
+    Schedule board (8196668916). The automation fires when the operator
+    flips a column to indicate the item is ready to schedule (Status →
+    "Ready to Schedule", or equivalently a Recipe Key column gets set —
+    the exact trigger column is configured Monday-side; engine doesn't
+    care which column changed, just that something on this board did).
+
+    Engine:
+    1. Verifies the URL secret (constant-time compare, same pattern as
+       the Phase 1 Blend Records webhook).
+    2. Echo-filters by user id (drops automations triggered by our own
+       writes — though spec-sheet writes shouldn't echo here anyway,
+       this stays as defense in depth).
+    3. Extracts the pulseId (Production Schedule item id) from the
+       payload.
+    4. Enqueues a SpecSheetItemReady event for the worker.
+
+    The worker does the actual read from Monday + payload parsing +
+    plan + apply. Webhook always returns 200 fast on auth pass — Monday
+    retries on non-2xx and we don't want operator delays from misformed
+    payloads to look like webhook outages.
+    """
+    _check_secret(secret)
+    payload = await request.json()
+
+    if "challenge" in payload:
+        log.info("Monday spec-sheet webhook challenge received")
+        return {"challenge": payload["challenge"]}
+
+    event = payload.get("event") or {}
+    board_id = event.get("boardId")
+    pulse_id = str(event.get("pulseId")) if event.get("pulseId") is not None else None
+    user_id = str(event.get("userId")) if event.get("userId") is not None else None
+
+    log.info(
+        "spec-sheet webhook received: board=%s pulse=%s user=%s",
+        board_id, pulse_id, user_id,
+    )
+
+    if pulse_id is None:
+        log.warning("spec-sheet webhook had no pulseId; ignoring")
+        return {"status": "received", "kind": "no_pulse_id"}
+
+    # Belt-and-suspenders: only accept triggers from the configured
+    # Production Schedule board. Prevents stray automations on other
+    # boards from accidentally scheduling against item ids the engine
+    # can't actually read.
+    s = get_settings()
+    if board_id is not None and board_id != s.nexiuum_production_schedule_board:
+        log.warning(
+            "spec-sheet webhook from unexpected board=%s (expected %s); ignoring",
+            board_id, s.nexiuum_production_schedule_board,
+        )
+        return {"status": "ignored", "kind": "wrong_board"}
+
+    # Echo filter — only meaningful if the engine ever wrote back to
+    # Production Schedule, which it doesn't (read-only board), but keep
+    # the symmetry with the other webhook handler.
+    if user_id is not None:
+        try:
+            engine_user = await get_engine_user_id()
+        except Exception:
+            log.exception("could not resolve engine user id; processing event without echo filter")
+            engine_user = None
+        if engine_user is not None and user_id == engine_user:
+            log.info(
+                "spec-sheet webhook from engine user (id=%s) — suppressing as echo",
+                user_id,
+            )
+            return {"status": "ignored", "kind": "echo"}
+
+    try:
+        await enqueue_event(SpecSheetItemReady(item_id=pulse_id))
+    except WorkerNotRunning:
+        log.error("worker not running; dropping SpecSheetItemReady for item=%s", pulse_id)
+        return {"status": "dropped", "kind": "worker_unavailable"}
+    return {"status": "enqueued", "kind": "spec_sheet_item_ready"}

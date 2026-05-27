@@ -267,3 +267,88 @@ def test_webhook_returns_200_even_if_worker_drops_event(client):
     body = resp.json()
     assert body["status"] == "dropped"
     assert body["kind"] == "worker_unavailable"
+
+
+# ─── Phase 2D — spec-sheet trigger ───────────────────────────────────────
+
+
+SPEC_SHEET_PATH = f"/webhook/monday/spec-sheet/{TEST_WEBHOOK_SECRET}"
+PRODUCTION_SCHEDULE_BOARD = 8196668916
+
+
+def test_spec_sheet_webhook_rejects_wrong_secret(client):
+    resp = client.post(
+        "/webhook/monday/spec-sheet/nope",
+        json={"event": {"boardId": PRODUCTION_SCHEDULE_BOARD, "pulseId": 1}},
+    )
+    assert resp.status_code == 401
+
+
+def test_spec_sheet_webhook_challenge_handshake(client):
+    resp = client.post(SPEC_SHEET_PATH, json={"challenge": "abc"})
+    assert resp.status_code == 200
+    assert resp.json() == {"challenge": "abc"}
+
+
+def test_spec_sheet_webhook_enqueues_spec_sheet_item_ready(client):
+    """Right board + pulseId → SpecSheetItemReady event enqueued."""
+    from engine.models import SpecSheetItemReady
+
+    payload = {
+        "event": {
+            "boardId": PRODUCTION_SCHEDULE_BOARD,
+            "pulseId": 12117039441,
+            "userId": "operator-789",
+            "type": "update_column_value",
+        }
+    }
+    with patch("engine.routes.webhook.enqueue_event", new_callable=AsyncMock) as mock_enq:
+        resp = client.post(SPEC_SHEET_PATH, json=payload)
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "enqueued", "kind": "spec_sheet_item_ready"}
+    mock_enq.assert_called_once()
+    (event,) = mock_enq.call_args.args
+    assert isinstance(event, SpecSheetItemReady)
+    assert event.item_id == "12117039441"
+
+
+def test_spec_sheet_webhook_ignores_wrong_board(client):
+    """Triggers from boards other than Production Schedule are dropped —
+    defense against stray Monday automations."""
+    payload = {
+        "event": {
+            "boardId": 99999999,
+            "pulseId": 12117039441,
+            "userId": "operator-789",
+        }
+    }
+    with patch("engine.routes.webhook.enqueue_event", new_callable=AsyncMock) as mock_enq:
+        resp = client.post(SPEC_SHEET_PATH, json=payload)
+    assert resp.status_code == 200
+    assert resp.json()["kind"] == "wrong_board"
+    mock_enq.assert_not_called()
+
+
+def test_spec_sheet_webhook_no_pulse_id_ignored(client):
+    payload = {"event": {"boardId": PRODUCTION_SCHEDULE_BOARD}}
+    with patch("engine.routes.webhook.enqueue_event", new_callable=AsyncMock) as mock_enq:
+        resp = client.post(SPEC_SHEET_PATH, json=payload)
+    assert resp.status_code == 200
+    assert resp.json()["kind"] == "no_pulse_id"
+    mock_enq.assert_not_called()
+
+
+def test_spec_sheet_webhook_drops_engine_echo(client):
+    """If our own engine user triggered the change, suppress."""
+    payload = {
+        "event": {
+            "boardId": PRODUCTION_SCHEDULE_BOARD,
+            "pulseId": 12117039441,
+            "userId": TEST_ENGINE_USER_ID,
+        }
+    }
+    with patch("engine.routes.webhook.enqueue_event", new_callable=AsyncMock) as mock_enq:
+        resp = client.post(SPEC_SHEET_PATH, json=payload)
+    assert resp.status_code == 200
+    assert resp.json()["kind"] == "echo"
+    mock_enq.assert_not_called()

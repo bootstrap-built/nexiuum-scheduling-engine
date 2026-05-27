@@ -31,6 +31,17 @@ from engine.core.scheduler import plan_for_new_order
 from engine.core.timezone import now_local
 from engine.io.apply import ApplyResult, apply_plan
 from engine.io.snapshot import read_snapshot
+from engine.core.spec_sheet import (
+    SpecSheetParseError,
+    UnsupportedManufacturingRouteError,
+    UnsupportedProductTypeError,
+    build_schedule_order,
+    parse_spec_sheet_payload,
+)
+from engine.io.spec_sheet_io import (
+    ProductionScheduleReadError,
+    read_spec_sheet_payload_for_item,
+)
 from engine.models import (
     ActualEndReported,
     ActualStartReported,
@@ -40,6 +51,7 @@ from engine.models import (
     ExpediteRequested,
     ManualReschedule,
     ScheduleNewOrder,
+    SpecSheetItemReady,
 )
 
 log = logging.getLogger(__name__)
@@ -113,6 +125,39 @@ async def process_event(event: Event) -> ApplyResult | None:
     if isinstance(event, ScheduleNewOrder):
         plan = plan_for_new_order(snapshot, event, now=now)
         return await _apply_or_noop(plan, label="ScheduleNewOrder")
+
+    if isinstance(event, SpecSheetItemReady):
+        # Phase 2D — translate a Production Schedule item into a
+        # ScheduleNewOrder + reuse the existing planning path. Reading
+        # Monday for the payload happens here (IO shell), translation
+        # is pure-core in engine.core.spec_sheet.
+        try:
+            payload_text = await read_spec_sheet_payload_for_item(event.item_id)
+            payload = parse_spec_sheet_payload(payload_text)
+            order = build_schedule_order(payload, job_reference_id=event.item_id)
+        except UnsupportedManufacturingRouteError as e:
+            log.info(
+                "SpecSheetItemReady item=%s skipped: %s",
+                event.item_id, e,
+            )
+            return None
+        except UnsupportedProductTypeError as e:
+            # Surface as warning (not error) so /health stays green —
+            # operator data-entry / missing-recipe is expected during
+            # the MVP rollout.
+            log.warning(
+                "SpecSheetItemReady item=%s rejected: %s",
+                event.item_id, e,
+            )
+            return None
+        except (SpecSheetParseError, ProductionScheduleReadError) as e:
+            log.error(
+                "SpecSheetItemReady item=%s ingest failed: %s",
+                event.item_id, e,
+            )
+            return None
+        plan = plan_for_new_order(snapshot, order, now=now)
+        return await _apply_or_noop(plan, label=f"SpecSheetItemReady[{event.item_id}]")
 
     if isinstance(event, ActualStartReported):
         plan = plan_for_actual_start(snapshot, event)
