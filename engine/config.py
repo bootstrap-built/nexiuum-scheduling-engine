@@ -223,6 +223,28 @@ class Settings(BaseSettings):
     # 30 min mirrors the default changeover_minutes on Capacity Engine.
     cross_stage_handoff_buffer_minutes: int = 30
 
+    # ── Cross-machine split (Phase 1.5) ──────────────────────────────────
+    # When a packaging-class stage has multiple eligible machines and a
+    # large quantity, the scheduler fans the slice across them so idle
+    # packaging machines don't sit while one machine grinds through a
+    # million tabs. Press stays single-machine.
+    #
+    # split_min_quantity: stage quantity (after the items_per_container
+    #   multiplier — i.e., compared against tab count not container count)
+    #   below which we never split. A 5k-tab order doesn't justify
+    #   fragmenting onto two machines. 50,000 is a reasonable default for
+    #   tablet/capsule volumes Makayla mentioned (orders into 7 figures).
+    # split_max_machines: hard cap on how many machines one stage spreads
+    #   across. Even with 8 eligible machines, splitting 6-ways is more
+    #   coordination headache than it's worth.
+    # split_chunk_round_to: chunk quantities round to the nearest N tabs
+    #   so the numbers operators see are clean (e.g., "350k / 250k" instead
+    #   of "353,847 / 246,153"). Remainder absorbed by the largest-capacity
+    #   machine's chunk so the total quantity is preserved exactly.
+    split_min_quantity: int = Field(50_000, ge=1)
+    split_max_machines: int = Field(4, ge=1)
+    split_chunk_round_to: int = Field(100, ge=1)
+
     # ── Timezone ─────────────────────────────────────────────────────────
     factory_tz: str = "America/Denver"
 

@@ -213,3 +213,87 @@ def test_commit_returns_504_on_worker_timeout(monkeypatch):
             )
     assert resp.status_code == 504
     assert "did not respond" in resp.json()["detail"]
+
+
+# ─── Packaging breakdown ─────────────────────────────────────────────────
+
+
+def _fake_snapshot_with_packaging() -> Snapshot:
+    """Snapshot with a Pressing machine + one Clamshell + one Sachet.
+
+    Used by the breakdown HTTP test below — the default _fake_snapshot only
+    has Pressing, so it can't route a packaging slice.
+    """
+    common = dict(
+        status=MachineStatus.ONLINE, hours_per_day=24,
+        working_window_start=0, working_window_end=24,
+        changeover_minutes=0, dual_sided_only=False,
+        max_job_size=None, force_route_condition=None, last_job_ended_at=None,
+    )
+    press = Machine(id="press", name="Mainline", process_group="Pressing", capacity_per_hour=200_000, **common)
+    clam = Machine(id="clam", name="Clam-1", process_group="Clamshell", capacity_per_hour=3_200, **common)
+    sach = Machine(id="sach", name="Sach-1", process_group="Sachet", capacity_per_hour=5_000, **common)
+    recipe = Recipe(
+        id="R1", name="r v1",
+        recipe_key="tablet-press-standard", version=1,
+        status=RecipeStatus.ACTIVE,
+        stages=(RecipeStage(id="press", machine_class="Pressing", depends_on=()),),
+    )
+    return Snapshot(read_at=NOW, machines=(press, clam, sach), recipes=(recipe,), slots=())
+
+
+def test_commit_accepts_packaging_breakdown():
+    """Breakdown payload accepted and the JSON-decoded order reaches the
+    worker. We don't assert on the placed slots here — pure-core tests
+    cover that — just that the HTTP layer accepts the new shape."""
+    with (
+        patch("engine.io.worker.read_snapshot", new_callable=AsyncMock) as mock_snap,
+        patch("engine.io.worker.apply_plan", new_callable=AsyncMock) as mock_apply,
+        patch("engine.io.worker.now_local", return_value=NOW),
+    ):
+        mock_snap.return_value = _fake_snapshot_with_packaging()
+        mock_apply.return_value = ApplyResult(
+            created_slot_ids=["s-press", "s-clam", "s-sach"], reflow_hash="h",
+        )
+        with TestClient(app) as c:
+            resp = c.post(
+                "/commit",
+                json={
+                    "job_reference_id": "11801201557",
+                    "recipe_key": "tablet-press-standard",
+                    "recipe_version": 1,
+                    "quantity": 200_000,
+                    "packaging_breakdown": [
+                        {
+                            "machine_class": "Clamshell",
+                            "quantity": 100_000,
+                            "items_per_container": 3,
+                            "config_notes": "3ct",
+                        },
+                        {
+                            "machine_class": "Sachet",
+                            "quantity": 100_000,
+                            "items_per_container": 5,
+                        },
+                    ],
+                },
+            )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["feasible"] is True
+
+
+def test_commit_rejects_unknown_packaging_class(client):
+    """Pressing/Capsule/Lot Coder are blocked at the route boundary."""
+    resp = client.post(
+        "/commit",
+        json={
+            "job_reference_id": "11801201557",
+            "recipe_key": "tablet-press-standard",
+            "recipe_version": 1,
+            "quantity": 100_000,
+            "packaging_breakdown": [
+                {"machine_class": "Lot Coder", "quantity": 100_000, "items_per_container": 1},
+            ],
+        },
+    )
+    assert resp.status_code == 422

@@ -30,7 +30,7 @@ from engine.core.scheduler import (
 )
 from engine.core.timezone import now_local
 from engine.io.snapshot import read_snapshot
-from engine.models import ScheduleNewOrder, Snapshot
+from engine.models import PackagingSlice, ScheduleNewOrder, Snapshot
 
 router = APIRouter(tags=["simulate"])
 
@@ -58,6 +58,18 @@ DEFAULT_PAD_FACTOR = 0.20
 # ─────────────────────────────────────────────────────────────────────────
 
 
+class PackagingSliceIn(BaseModel):
+    """One entry in the order's packaging breakdown — same shape as the
+    /commit route's PackagingSliceIn but kept separate to avoid coupling
+    the two endpoints' schemas.
+    """
+
+    machine_class: Literal["Sachet", "Blister", "Clamshell", "Bottle"]
+    quantity: int = Field(..., gt=0)
+    items_per_container: int = Field(1, ge=1)
+    config_notes: str = Field("", max_length=120)
+
+
 class SimulateRequest(BaseModel):
     """Hypothetical order for CTP lookup."""
 
@@ -74,6 +86,13 @@ class SimulateRequest(BaseModel):
         ge=0.0,
         le=1.0,
         description="Pad as a fraction of duration. Default 0.20 per Jason.",
+    )
+    packaging_breakdown: list[PackagingSliceIn] = Field(
+        default_factory=list,
+        description=(
+            "Same shape as /commit. Empty = recipe-only stages; non-empty "
+            "= synthetic packaging stages appended after the recipe DAG."
+        ),
     )
 
 
@@ -129,6 +148,15 @@ def simulate_handler(req: SimulateRequest, snapshot: Snapshot, *, now: datetime)
     Tests pass a mock Snapshot and now. Production route adapter reads the
     real Snapshot from Monday.
     """
+    breakdown = tuple(
+        PackagingSlice(
+            machine_class=s.machine_class,  # type: ignore[arg-type]
+            quantity=s.quantity,
+            items_per_container=s.items_per_container,
+            config_notes=s.config_notes,
+        )
+        for s in req.packaging_breakdown
+    )
     order = ScheduleNewOrder(
         job_reference_id=SIMULATE_JOB_ID,
         recipe_key=req.recipe_key,
@@ -137,6 +165,7 @@ def simulate_handler(req: SimulateRequest, snapshot: Snapshot, *, now: datetime)
         dual_sided=req.dual_sided,
         active_mg=req.active_mg,
         requested_ship_by=req.requested_ship_by,
+        packaging_breakdown=breakdown,
     )
 
     plan = plan_for_new_order(snapshot, order, now=now)

@@ -532,3 +532,54 @@ def test_baton_pass_handles_dangling_recipe_gracefully():
     assert "press-1" in written
     assert "blister-1" not in written
     assert any("dangling recipe" in n for n in plan.notes)
+
+
+def test_baton_pass_pushes_synthetic_packaging_slots():
+    """Phase 1.5 — when a recipe terminal stage finishes, baton-pass also
+    pushes synthetic packaging slots (stage_id starts with `pkg_`) for the
+    same job. These slots aren't in the recipe DAG, so the recipe-only
+    dependency lookup would miss them without this branch.
+    """
+    # Recipe = press only (terminal stage = press).
+    actual_at = NOW.replace(hour=12)
+    press_slot = _slot(
+        id_="press-1", stage_id="press",
+        status=SlotStatus.RUNNING, actual_start=NOW,
+    )
+    clam_slot = Slot(
+        id="pkg-clam-1", name="N1 → pkg_0_Clamshell",
+        job_reference_id="J1", machine_id="M2",
+        stage_id="pkg_0_Clamshell",
+        recipe_key="tablet-press-standard", recipe_version=1,
+        quantity=250_000,
+        planned_start=NOW.replace(hour=10), planned_end=NOW.replace(hour=14),
+        actual_start=None, actual_end=None,
+        dependent_on_ids=(), status=SlotStatus.QUEUED,
+        manually_placed=False, priority=Priority.NORMAL,
+        last_reflow_hash=None, drift_last_detected_at=None,
+    )
+    sach_slot = Slot(
+        id="pkg-sach-1", name="N1 → pkg_1_Sachet",
+        job_reference_id="J1", machine_id="M3",
+        stage_id="pkg_1_Sachet",
+        recipe_key="tablet-press-standard", recipe_version=1,
+        quantity=250_000,
+        planned_start=NOW.replace(hour=10), planned_end=NOW.replace(hour=15),
+        actual_start=None, actual_end=None,
+        dependent_on_ids=(), status=SlotStatus.QUEUED,
+        manually_placed=False, priority=Priority.NORMAL,
+        last_reflow_hash=None, drift_last_detected_at=None,
+    )
+    snap = _snapshot((press_slot, clam_slot, sach_slot))
+    event = ActualEndReported(
+        job_reference_id="J1", stage_id="press", actual_at=actual_at,
+    )
+
+    plan = plan_for_actual_end(snap, event, handoff_buffer_minutes=30)
+    by_slot = {w.slot_id: w for w in plan.slot_writes}
+
+    assert "press-1" in by_slot  # the finishing slot itself
+    # Both synthetic packaging slots get pushed to actual_at + 30min.
+    expected_start = actual_at.replace(hour=12, minute=30)
+    assert by_slot["pkg-clam-1"].planned_start == expected_start
+    assert by_slot["pkg-sach-1"].planned_start == expected_start

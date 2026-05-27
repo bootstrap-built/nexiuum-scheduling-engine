@@ -215,3 +215,83 @@ def test_simulate_post_zero_pad(client):
     body = resp.json()
     # No pad: padded_end == projected_end
     assert body["padded_end"] == body["projected_end"]
+
+
+# ─── Packaging breakdown propagates through HTTP ─────────────────────────
+
+
+def test_simulate_post_accepts_packaging_breakdown(client):
+    """A breakdown with one clamshell slice + one sachet slice → response
+    includes synthetic packaging stages alongside press."""
+
+    def snapshot_with_packaging():
+        return _snap(
+            [
+                _machine("Mainline", capacity=200_000, process_group="Pressing"),
+                _machine("Clam-1", capacity=3_200, process_group="Clamshell"),
+                _machine("Sach-1", capacity=5_000, process_group="Sachet"),
+            ],
+            [_press_recipe()],
+        )
+
+    app.dependency_overrides[get_current_snapshot] = snapshot_with_packaging
+
+    resp = client.post(
+        "/simulate",
+        json={
+            "recipe_key": "tablet-press-standard",
+            "recipe_version": 1,
+            "quantity": 200_000,
+            "packaging_breakdown": [
+                {
+                    "machine_class": "Clamshell",
+                    "quantity": 100_000,
+                    "items_per_container": 3,
+                    "config_notes": "3ct",
+                },
+                {
+                    "machine_class": "Sachet",
+                    "quantity": 100_000,
+                    "items_per_container": 5,
+                    "config_notes": "5ct",
+                },
+            ],
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    stage_ids = {s["stage_id"] for s in resp.json()["stages"]}
+    assert "press" in stage_ids
+    assert "pkg_0_Clamshell" in stage_ids
+    assert "pkg_1_Sachet" in stage_ids
+
+
+def test_simulate_post_rejects_unknown_packaging_class(client):
+    """Pydantic Literal type rejects non-packaging machine classes at the edge."""
+    resp = client.post(
+        "/simulate",
+        json={
+            "recipe_key": "tablet-press-standard",
+            "recipe_version": 1,
+            "quantity": 100_000,
+            "packaging_breakdown": [
+                {"machine_class": "Pressing", "quantity": 100_000, "items_per_container": 1},
+            ],
+        },
+    )
+    assert resp.status_code == 422  # FastAPI/Pydantic validation
+
+
+def test_simulate_post_rejects_zero_items_per_container(client):
+    """Items per container must be >= 1."""
+    resp = client.post(
+        "/simulate",
+        json={
+            "recipe_key": "tablet-press-standard",
+            "recipe_version": 1,
+            "quantity": 100_000,
+            "packaging_breakdown": [
+                {"machine_class": "Clamshell", "quantity": 100_000, "items_per_container": 0},
+            ],
+        },
+    )
+    assert resp.status_code == 422

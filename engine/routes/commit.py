@@ -24,7 +24,7 @@ from engine.core.scheduler import (
     UnroutableStageError,
 )
 from engine.io.worker import submit_event
-from engine.models import ScheduleNewOrder
+from engine.models import PackagingSlice, ScheduleNewOrder
 from engine.routes.simulate import SimulateError
 
 router = APIRouter(tags=["commit"])
@@ -35,6 +35,20 @@ router = APIRouter(tags=["commit"])
 # whitespace, smart quotes, or unicode that the Monday columns would happily
 # accept but downstream scheduler joins would silently miss.
 _RECIPE_KEY_PATTERN = r"^[a-z0-9][a-z0-9_-]{0,63}$"
+
+
+class PackagingSliceIn(BaseModel):
+    """One entry in the order's packaging breakdown.
+
+    machine_class is constrained to the four CONTAINER_CAPACITY_GROUPS
+    classes — Pressing/Capsule are upstream stages (belong in the recipe),
+    and Lot Coder/Hand-pack haven't been signed off by Makayla yet.
+    """
+
+    machine_class: Literal["Sachet", "Blister", "Clamshell", "Bottle"]
+    quantity: int = Field(..., gt=0)
+    items_per_container: int = Field(1, ge=1)
+    config_notes: str = Field("", max_length=120)
 
 
 class CommitRequest(BaseModel):
@@ -61,6 +75,16 @@ class CommitRequest(BaseModel):
     dual_sided: bool = False
     active_mg: float | None = Field(None, ge=0)
     requested_ship_by: datetime | None = None
+    packaging_breakdown: list[PackagingSliceIn] = Field(
+        default_factory=list,
+        description=(
+            "Optional. When provided, the engine appends one synthetic "
+            "packaging stage per slice (each depending on the recipe's "
+            "terminal stages). Sum of slice quantities should equal the "
+            "order quantity; the engine doesn't enforce that — it places "
+            "each slice independently."
+        ),
+    )
 
 
 class CommitResponse(BaseModel):
@@ -80,6 +104,15 @@ async def commit_route(req: CommitRequest) -> CommitResponse:
     if req.job_reference_id == "__simulate__":
         raise HTTPException(status_code=400, detail="job_reference_id must be a real item id")
 
+    breakdown = tuple(
+        PackagingSlice(
+            machine_class=s.machine_class,  # type: ignore[arg-type]
+            quantity=s.quantity,
+            items_per_container=s.items_per_container,
+            config_notes=s.config_notes,
+        )
+        for s in req.packaging_breakdown
+    )
     order = ScheduleNewOrder(
         job_reference_id=req.job_reference_id,
         recipe_key=req.recipe_key,
@@ -88,6 +121,7 @@ async def commit_route(req: CommitRequest) -> CommitResponse:
         dual_sided=req.dual_sided,
         active_mg=req.active_mg,
         requested_ship_by=req.requested_ship_by,
+        packaging_breakdown=breakdown,
     )
 
     timeout = get_settings().commit_timeout_seconds

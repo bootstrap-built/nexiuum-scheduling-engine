@@ -191,6 +191,32 @@ def plan_for_actual_end(
                 stage.id for stage in recipe.stages
                 if event.stage_id in stage.depends_on
             }
+            # Phase 1.5 — synthetic packaging stages (from a spec sheet's
+            # packaging_breakdown) live on slots as `pkg_*` stage_ids but
+            # aren't in the recipe. By construction they depend on the
+            # recipe's terminal stages. If `event.stage_id` is one of those
+            # terminals (a recipe stage that nothing in the recipe depends
+            # on), every `pkg_*` slot for this job is a dependent and gets
+            # pushed.
+            #
+            # CRITICAL: gate on event.stage_id being a recipe stage. A
+            # `pkg_*` slot finishing also looks "terminal" by the
+            # depends-on check (nothing in the recipe depends on it
+            # either), but its siblings are NOT actually downstream of it
+            # — both pkg_0_Clamshell and pkg_1_Sachet depend on press,
+            # not on each other. Without this gate, finishing one
+            # packaging slice would falsely push every other packaging
+            # slice forward.
+            event_stage_is_in_recipe = any(
+                s.id == event.stage_id for s in recipe.stages
+            )
+            event_is_terminal = event_stage_is_in_recipe and not any(
+                event.stage_id in s.depends_on for s in recipe.stages
+            )
+            if event_is_terminal:
+                for s in job_slots:
+                    if s.stage_id and s.stage_id.startswith("pkg_"):
+                        dependent_stage_ids.add(s.stage_id)
             for dep_slot in job_slots:
                 if dep_slot.stage_id not in dependent_stage_ids:
                     continue

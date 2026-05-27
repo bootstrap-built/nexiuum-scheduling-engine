@@ -50,6 +50,31 @@ ProcessGroup = Literal[
 ]
 
 
+# Process groups whose Capacity Engine "units/hr" is the *packaging container*
+# rate, not the tablet/capsule rate. A Clamshell-1 at 3,200 units/hr packs
+# 3,200 *clamshells* per hour — if each clamshell holds 5 tabs, real tab
+# throughput is 16,000/hr. Scheduler multiplies capacity by
+# `PackagingSlice.items_per_container` when computing duration for these.
+#
+# Lot Coder and Hand-pack are intentionally NOT in this set (item-rate for
+# now). VERIFY WITH MAKAYLA before either runs a real order — Lot Coder
+# likely codes *containers* after a packaging stage, so it probably belongs
+# here; Hand-pack semantics depend on whether ops counts containers or tabs.
+CONTAINER_CAPACITY_GROUPS: frozenset[ProcessGroup] = frozenset(
+    {"Sachet", "Blister", "Clamshell", "Bottle"}
+)
+
+
+# Process groups that the scheduler will fan a single stage across multiple
+# eligible machines for (cross-machine split). Press stays single-machine —
+# Makayla confirmed splitting only happens on the packaging side. Same set
+# as CONTAINER_CAPACITY_GROUPS today but kept separate so packaging-rate
+# vs. parallel-fan-out decisions can drift independently later.
+SPLITTABLE_PROCESS_GROUPS: frozenset[ProcessGroup] = frozenset(
+    {"Sachet", "Blister", "Clamshell", "Bottle"}
+)
+
+
 # ─────────────────────────────────────────────────────────────────────────
 # Domain entities
 # ─────────────────────────────────────────────────────────────────────────
@@ -205,6 +230,38 @@ class Snapshot:
 
 
 @dataclass(frozen=True)
+class PackagingSlice:
+    """One packaging configuration within an order's packaging breakdown.
+
+    Captures a portion of the order that's packaged in a particular machine
+    class with a particular container fill count. Drives:
+
+    - Generation of a synthetic packaging stage hung off the recipe's
+      terminal stage(s).
+    - Per-slice cross-machine splitting (a 500k-tab slice may fan across
+      multiple Clamshell machines).
+    - Container-rate capacity math via `items_per_container`.
+
+    Example: an order for 1,000,000 tablets packaged as 50% 3-count
+    clamshells + 50% 5-count sachets becomes:
+
+        packaging_breakdown=(
+            PackagingSlice("Clamshell", 500_000, 3, "3ct"),
+            PackagingSlice("Sachet",    500_000, 5, "5ct"),
+        )
+
+    `config_notes` is operator-facing — appears in slot names and on the
+    Marey chart. Free-text per the Spec Sheet form decision (blister
+    configs like "3 count diamond" don't fit a dropdown).
+    """
+
+    machine_class: ProcessGroup
+    quantity: int
+    items_per_container: int = 1
+    config_notes: str = ""
+
+
+@dataclass(frozen=True)
 class ScheduleNewOrder:
     """Event: a new upstream order needs to be scheduled."""
 
@@ -216,6 +273,13 @@ class ScheduleNewOrder:
     dual_sided: bool = False
     active_mg: float | None = None
     requested_ship_by: datetime | None = None
+    # Phase 1.5 — packaging breakdown for split-packaging orders. Empty tuple
+    # preserves Phase 1/2C behavior: only the recipe-defined stages run.
+    # When non-empty, the scheduler appends one synthetic packaging stage per
+    # slice, each depending on the recipe DAG's terminal stage(s). Slices can
+    # share a machine_class (rare — two clamshell configs) or differ
+    # (common — clamshell + sachet split).
+    packaging_breakdown: tuple[PackagingSlice, ...] = ()
 
 
 @dataclass(frozen=True)
