@@ -1,0 +1,553 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Production Flow — String-line Scheduling View</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0d0f13; --panel:#13161c; --panel-2:#171b22; --rail:#1f2530;
+    --line:#262c38; --grid:#1d222b; --grid-strong:#2c333f;
+    --txt:#cdd2dc; --txt-dim:#828a99; --txt-faint:#5b6473;
+    --press:#3c9be0; --pkg:#2bb39a;
+    --now:#f0a93c;
+    --j1:#e0653c; --j2:#2bb39a; --j3:#8b7be8; --j4:#e0a23c; --j5:#3c9be0; --j6:#e058a0; --j7:#7bd0e0;
+    --lane-h:30px; --hdr-h:26px; --gutter:172px;
+    --font:'Archivo',system-ui,sans-serif; --mono:'IBM Plex Mono',ui-monospace,monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{background:var(--bg);color:var(--txt);font-family:var(--font);
+    font-feature-settings:"tnum" 1;-webkit-font-smoothing:antialiased;overflow:hidden}
+  .app{display:flex;flex-direction:column;height:100vh;min-height:560px}
+
+  /* ---- top bar ---- */
+  header{display:flex;align-items:center;gap:20px;padding:14px 20px;
+    background:var(--panel);border-bottom:1px solid var(--line);flex:0 0 auto}
+  .brand{display:flex;flex-direction:column;gap:2px}
+  .brand h1{font-size:15px;font-weight:600;letter-spacing:.02em}
+  .brand span{font-size:11px;color:var(--txt-dim);letter-spacing:.06em;text-transform:uppercase}
+  .feed{display:flex;align-items:center;gap:8px;font-size:11.5px;color:var(--txt-dim);
+    font-family:var(--mono);letter-spacing:.02em}
+  .dot{width:7px;height:7px;border-radius:50%;background:var(--txt-faint);transition:.3s}
+  .feed.live .dot{background:#39d98a;box-shadow:0 0 0 4px rgba(57,217,138,.15)}
+  .feed.live .dot{animation:pulse 1.6s ease-in-out infinite}
+  @keyframes pulse{50%{box-shadow:0 0 0 7px rgba(57,217,138,.04)}}
+  .controls{margin-left:auto;display:flex;align-items:center;gap:10px}
+  .seg{display:flex;border:1px solid var(--line);border-radius:7px;overflow:hidden}
+  .seg button{background:transparent;color:var(--txt-dim);border:0;
+    font-family:var(--font);font-size:12px;padding:7px 12px;cursor:pointer;transition:.15s}
+  .seg button+button{border-left:1px solid var(--line)}
+  .seg button.on{background:var(--rail);color:var(--txt)}
+  .seg button:hover{color:var(--txt)}
+  select,.btn{background:var(--panel-2);color:var(--txt);border:1px solid var(--line);
+    border-radius:7px;font-family:var(--font);font-size:12px;padding:7px 11px;cursor:pointer}
+  select:hover,.btn:hover{border-color:var(--grid-strong)}
+  .btn.primary{background:var(--press);border-color:var(--press);color:#04121d;font-weight:600}
+  .btn.primary.running{background:transparent;color:var(--press)}
+  label.ctl{font-size:11px;color:var(--txt-faint);letter-spacing:.05em;
+    text-transform:uppercase;margin-right:-4px}
+
+  /* ---- body ---- */
+  .body{flex:1 1 auto;display:flex;min-height:0}
+  .labels{flex:0 0 var(--gutter);background:var(--panel);border-right:1px solid var(--line);
+    overflow:hidden;padding-top:var(--hdr-h)}
+  .grp-l{height:var(--hdr-h);display:flex;align-items:center;padding:0 16px;
+    font-size:10.5px;font-weight:600;letter-spacing:.14em;text-transform:uppercase;color:var(--txt-faint);
+    border-top:1px solid var(--line)}
+  .grp-l.press{color:var(--press)} .grp-l.pkg{color:var(--pkg)}
+  .lane-l{height:var(--lane-h);display:flex;align-items:center;justify-content:space-between;
+    padding:0 16px 0 22px;font-size:12.5px;color:var(--txt);position:relative}
+  .lane-l .cap{font-family:var(--mono);font-size:10.5px;color:var(--txt-faint)}
+  .lane-l.down{color:var(--txt-faint)}
+  .lane-l.down .cap{color:#c2554a}
+  .lane-l::before{content:"";position:absolute;left:10px;top:50%;width:5px;height:5px;
+    border-radius:50%;transform:translateY(-50%);background:var(--rail)}
+  .lane-l.press::before{background:rgba(60,155,224,.5)}
+  .lane-l.pkg::before{background:rgba(43,179,154,.5)}
+  .scroll{flex:1 1 auto;overflow-x:auto;overflow-y:hidden;background:var(--bg)}
+  svg{display:block}
+  text{font-family:var(--font)}
+  .ax{font-family:var(--mono);font-size:11px;fill:var(--txt-faint)}
+  .axd{font-size:11px;fill:var(--txt-dim);font-weight:600;letter-spacing:.04em}
+  .seg-bar{stroke-linecap:round;cursor:pointer;transition:opacity .18s}
+  .edge{fill:none;stroke-linecap:round;transition:opacity .18s}
+  .dim{opacity:.13}
+  .past{opacity:.5}
+  .hatch rect{opacity:.5}
+
+  /* ---- footer / legend ---- */
+  footer{flex:0 0 auto;display:flex;align-items:center;gap:18px;flex-wrap:wrap;
+    padding:11px 20px;background:var(--panel);border-top:1px solid var(--line)}
+  .legend{display:flex;gap:7px;flex-wrap:wrap}
+  .chip{display:flex;align-items:center;gap:7px;padding:5px 11px 5px 9px;
+    border:1px solid var(--line);border-radius:20px;font-size:11.5px;color:var(--txt-dim);
+    cursor:pointer;transition:.15s;font-family:var(--mono)}
+  .chip:hover{color:var(--txt);border-color:var(--grid-strong)}
+  .chip.on{color:var(--txt);background:var(--panel-2);border-color:var(--grid-strong)}
+  .swatch{width:9px;height:9px;border-radius:2px}
+  .key{margin-left:auto;display:flex;gap:16px;font-size:11px;color:var(--txt-faint)}
+  .key span{display:flex;align-items:center;gap:6px}
+  .key i{width:16px;height:0;border-top:2px solid var(--txt-faint);display:inline-block}
+  .key i.dash{border-top-style:dashed}
+
+  /* ---- tooltip / toast ---- */
+  #tip{position:fixed;pointer-events:none;z-index:30;opacity:0;transition:opacity .12s;
+    background:#0a0c10;border:1px solid var(--grid-strong);border-radius:9px;
+    padding:11px 13px;min-width:190px;box-shadow:0 12px 34px rgba(0,0,0,.55)}
+  #tip h4{font-size:13px;font-weight:600;margin-bottom:7px;display:flex;align-items:center;gap:8px}
+  #tip h4 .sw{width:9px;height:9px;border-radius:2px}
+  #tip .r{display:flex;justify-content:space-between;gap:22px;font-size:11.5px;
+    padding:2px 0;color:var(--txt-dim)}
+  #tip .r b{color:var(--txt);font-weight:500;font-family:var(--mono)}
+  #tip .tag{font-size:10px;font-family:var(--mono);padding:2px 7px;border-radius:4px;letter-spacing:.04em}
+  .tag.hold{background:rgba(224,162,60,.16);color:#e0a23c}
+  .tag.run{background:rgba(57,217,138,.14);color:#39d98a}
+  .tag.queue{background:var(--rail);color:var(--txt-dim)}
+  #toast{position:fixed;left:50%;bottom:84px;transform:translateX(-50%) translateY(14px);
+    background:#0a0c10;border:1px solid var(--grid-strong);border-left:3px solid var(--now);
+    padding:11px 16px;border-radius:8px;font-size:12.5px;color:var(--txt);
+    opacity:0;transition:.3s;z-index:40;box-shadow:0 12px 34px rgba(0,0,0,.5)}
+  #toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+  #toast b{color:var(--now)}
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <div class="brand">
+      <h1>Production Flow</h1>
+      <span>String-line scheduling · embedded view</span>
+    </div>
+    <div class="feed" id="feed">
+      <div class="dot"></div><span id="feedTxt">FEED IDLE — press ▶ to simulate</span>
+    </div>
+    <div class="controls">
+      <label class="ctl">Zoom</label>
+      <div class="seg" id="zoom">
+        <button data-z="fit" class="on">Fit</button>
+        <button data-z="24">24 h</button>
+        <button data-z="72">72 h</button>
+      </div>
+      <label class="ctl">Take down</label>
+      <select id="downSel">
+        <option value="">— none —</option>
+      </select>
+      <button class="btn" id="resetBtn">Reset</button>
+      <button class="btn primary" id="playBtn">▶ Simulate live</button>
+    </div>
+  </header>
+
+  <div class="body">
+    <div class="labels" id="labels"></div>
+    <div class="scroll" id="scroll"><svg id="plot"></svg></div>
+  </div>
+
+  <footer>
+    <div class="legend" id="legend"></div>
+    <div class="key">
+      <span><i></i> run / process</span>
+      <span><i class="dash"></i> handoff &amp; dependency</span>
+      <span><i style="border-color:var(--now)"></i> now</span>
+    </div>
+  </footer>
+</div>
+<div id="tip"></div>
+<div id="toast"></div>
+
+<script>
+/* =========================================================================
+   DATA SEAM  —  getScheduleSnapshot()
+   -------------------------------------------------------------------------
+   In production this is NOT hand-authored. It is the JSON that n8n composes
+   from the Monday boards (capacity engine + press schedule + packaging
+   schedule) and pushes to this view over SSE / WebSocket. Replace the body
+   of this function with your feed; the renderer below is a pure function of
+   this shape and never needs to change.
+
+     lanes : [{ id, name, group:'press'|'pkg', capacity:'40k/hr' }]
+     jobs  : [{
+        id, label, color,
+        nodes:[{ id, lane, t0, t1, kind:'run'|'hold', deferred? }],   // minutes from epoch
+        edges:[[fromNodeId, toNodeId, 'flow'|'hold']],                // DAG: fork/merge supported
+        meta:{ order, qty, pin }
+     }]
+   ========================================================================= */
+function getScheduleSnapshot(){
+  const lanes = [
+    {id:'merlin', name:'Merlin',        group:'press', capacity:'40k/hr'},
+    {id:'gandalf',name:'Gandalf',       group:'press', capacity:'40k/hr'},
+    {id:'lance',  name:'Lancelot',      group:'press', capacity:'40k/hr'},
+    {id:'houd',   name:'Houdini',       group:'press', capacity:'30k/hr'},
+    {id:'pnt',    name:'Penn & Teller', group:'press', capacity:'5k/hr · 2-side'},
+    {id:'copp',   name:'Copperfield',   group:'press', capacity:'8k/hr · R&D'},
+    {id:'elph',   name:'Elphaba',       group:'press', capacity:'50k/hr · caps'},
+    {id:'sa1',    name:'Sachet 1',      group:'pkg',   capacity:'1.75k/hr'},
+    {id:'sa2',    name:'Sachet 2',      group:'pkg',   capacity:'1.75k/hr'},
+    {id:'sa3',    name:'Sachet 3',      group:'pkg',   capacity:'1.5k/hr'},
+    {id:'bl1',    name:'Blister 1',     group:'pkg',   capacity:'4k/hr'},
+    {id:'bl2',    name:'Blister 2',     group:'pkg',   capacity:'2k/hr'},
+    {id:'lc1',    name:'Lot Coder 1',   group:'pkg',   capacity:'7k/hr'},
+    {id:'cl1',    name:'Clamshell 1',   group:'pkg',   capacity:'3.2k/hr'},
+    {id:'cl2',    name:'Clamshell 2',   group:'pkg',   capacity:'1.8k/hr'},
+    {id:'bo1',    name:'Bottle 1',      group:'pkg',   capacity:'2.4k/hr'},
+  ];
+  const jobs = [
+    { id:'N2213', label:'N2213', color:'var(--j3)',
+      meta:{order:'Nexiuum', qty:'300k tabs', pin:'>80mg active → Lancelot'},
+      nodes:[
+        {id:'a', lane:'lance', t0:0,   t1:450, kind:'run'},
+        {id:'b', lane:'bl1',   t0:485, t1:760, kind:'run'},
+        {id:'c', lane:'lc1',   t0:485, t1:690, kind:'run'},
+        {id:'d', lane:'cl1',   t0:800, t1:1180,kind:'run'},
+      ],
+      edges:[['a','b','flow'],['a','c','flow'],['b','d','flow'],['c','d','flow']] },
+
+    { id:'N2214', label:'N2214', color:'var(--j2)',
+      meta:{order:'Hyperion', qty:'10k tabs', pin:'<10k → Copperfield'},
+      nodes:[
+        {id:'a', lane:'copp', t0:120, t1:240, kind:'run'},
+        {id:'b', lane:'sa1',  t0:275, t1:560, kind:'run'},
+      ],
+      edges:[['a','b','flow']] },
+
+    { id:'N2215', label:'N2215', color:'var(--j1)',
+      meta:{order:'Vantage', qty:'90k 2-side', pin:'double-sided → Penn & Teller'},
+      nodes:[
+        {id:'a', lane:'pnt', t0:0,   t1:330, kind:'run'},
+        {id:'b', lane:'bl2', t0:365, t1:640, kind:'run'},
+      ],
+      edges:[['a','b','flow']] },
+
+    { id:'N2216·A', label:'N2216·A', color:'var(--j4)',
+      meta:{order:'Atlas — flavor A', qty:'200k / 5-flavor PO', pin:'round-robin'},
+      nodes:[
+        {id:'a', lane:'gandalf', t0:200, t1:560, kind:'run'},
+        {id:'b', lane:'sa2',     t0:600, t1:980, kind:'run'},
+      ],
+      edges:[['a','b','flow']] },
+
+    { id:'N2216·B', label:'N2216·B', color:'var(--j4)',
+      meta:{order:'Atlas — flavor B', qty:'200k / 5-flavor PO', pin:'round-robin'},
+      nodes:[
+        {id:'a', lane:'houd', t0:220, t1:600, kind:'run'},
+        {id:'b', lane:'sa3',  t0:640, t1:1020,kind:'run'},
+      ],
+      edges:[['a','b','flow']],
+      reroute:{from:'houd', to:'merlin'} },
+
+    { id:'N2217', label:'N2217', color:'var(--j5)',
+      meta:{order:'Solace', qty:'520k caps', pin:'capsules → Elphaba'},
+      nodes:[
+        {id:'a', lane:'elph', t0:0,   t1:560, kind:'run'},
+        {id:'b', lane:'bo1',  t0:600, t1:960, kind:'run'},
+      ],
+      edges:[['a','b','flow']] },
+
+    { id:'N2220', label:'N2220', color:'var(--j6)',
+      meta:{order:'Meridian', qty:'140k tabs', pin:'pkg not on hand'},
+      nodes:[
+        {id:'a', lane:'gandalf', t0:620, t1:900,  kind:'run'},
+        {id:'b', lane:'bl1',     t0:935, t1:1140, kind:'run'},
+        {id:'h', lane:'bl1',     t0:1140,t1:1340, kind:'hold'},
+        {id:'d', lane:'cl2',     t0:1380,t1:1640, kind:'run', deferred:true},
+      ],
+      edges:[['a','b','flow'],['b','h','hold'],['h','d','hold']] },
+  ];
+  return { lanes, jobs, epoch:'Mon 06:00', span:[-90, 1700] };
+}
+
+/* ---- a job that arrives mid-stream while "live" (realtime ingest demo) ---- */
+function incomingJob(){
+  return { id:'N2231', label:'N2231', color:'var(--j7)',
+    meta:{order:'Rush — trade show', qty:'60k tabs', pin:'round-robin'},
+    nodes:[
+      {id:'a', lane:'merlin', t0:760, t1:980,  kind:'run'},
+      {id:'b', lane:'bl2',    t0:1015,t1:1230, kind:'run'},
+    ],
+    edges:[['a','b','flow']] };
+}
+
+/* ========================  RENDERER  ======================== */
+const S = getScheduleSnapshot();
+const LANE_H=30, HDR_H=26;
+let zoom='fit', nowT=-90, simulating=false, focusId=null, offline=new Set();
+let jobs=JSON.parse(JSON.stringify(S.jobs));
+let firedDown=false, firedIngest=false, timer=null;
+
+const el=id=>document.getElementById(id);
+const lanesById={}; S.lanes.forEach(l=>lanesById[l.id]=l);
+
+/* lane row index (group headers occupy their own band) */
+function buildRows(){
+  const r=[]; let y=HDR_H; // first group header sits at top
+  ['press','pkg'].forEach(g=>{
+    r.push({type:'hdr',group:g,y:y-HDR_H});
+    S.lanes.filter(l=>l.group===g).forEach(l=>{ r.push({type:'lane',lane:l,y}); y+=LANE_H; });
+    y+=HDR_H;
+  });
+  return {r, total:y-HDR_H};
+}
+let RB=buildRows();
+const laneY=id=>{ const row=RB.r.find(x=>x.type==='lane'&&x.lane.id===id); return row? row.y+LANE_H/2 : 0; };
+
+/* time scale */
+function pxPerMin(){
+  const span=S.span[1]-S.span[0];
+  const vw=el('scroll').clientWidth||1100;
+  if(zoom==='fit') return Math.max(0.34,(vw-40)/span);
+  if(zoom==='24')  return 1.4;
+  return 0.5;
+}
+const PAD=24;
+function X(t){ return PAD+(t-S.span[0])*pxPerMin(); }
+function plotW(){ return PAD*2+(S.span[1]-S.span[0])*pxPerMin(); }
+
+/* apply machine-down reroute */
+function applyOffline(){
+  jobs=JSON.parse(JSON.stringify(S.jobs));
+  if(simulating){ jobs.push(...extraJobs); }
+  jobs.forEach(j=>{
+    j.nodes.forEach(n=>{
+      if(offline.has(n.lane)){
+        const rr=j.reroute && j.reroute.from===n.lane ? j.reroute.to : firstFreePress(n.lane);
+        if(rr){ n.lane=rr; n._rerouted=true; }
+      }
+    });
+  });
+}
+let extraJobs=[];
+function firstFreePress(from){
+  const order=['merlin','gandalf','lance','houd','copp'];
+  for(const id of order){ if(id!==from && !offline.has(id)) return id; }
+  return null;
+}
+
+/* minute → "D1 14:00"  (epoch Mon 06:00) */
+function fmt(t){
+  const base=6*60; const abs=base+t;
+  const day=Math.floor(abs/1440)+1; let m=((abs%1440)+1440)%1440;
+  const hh=String(Math.floor(m/60)).padStart(2,'0'), mm=String(m%60).padStart(2,'0');
+  return 'D'+day+' '+hh+':'+mm;
+}
+
+function render(){
+  RB=buildRows();
+  applyOffline();
+  const W=plotW(), H=RB.total+HDR_H;
+  const svg=el('plot');
+  svg.setAttribute('width',W); svg.setAttribute('height',H);
+  svg.setAttribute('viewBox','0 0 '+W+' '+H);
+
+  let g='';
+
+  /* off-shift shading: 16h day = 06:00–22:00 → minutes 0..960, off 960..1440 ... */
+  for(let d=0; d<3; d++){
+    const offStart=960+d*1440, offEnd=1440+d*1440;
+    if(offEnd<S.span[0]||offStart>S.span[1]) continue;
+    const x0=X(Math.max(offStart,S.span[0])), x1=X(Math.min(offEnd,S.span[1]));
+    g+=`<rect x="${x0}" y="${HDR_H}" width="${Math.max(0,x1-x0)}" height="${H-HDR_H}" fill="#0a0b0e"/>`;
+  }
+
+  /* vertical time grid every 2h, day separators every 24h */
+  for(let t=Math.ceil(S.span[0]/120)*120; t<=S.span[1]; t+=120){
+    const x=X(t), abs=6*60+t, isDay=((abs%1440)===0);
+    g+=`<line x1="${x}" y1="${HDR_H}" x2="${x}" y2="${H}" stroke="${isDay?'var(--grid-strong)':'var(--grid)'}" stroke-width="${isDay?1.2:1}"/>`;
+    g+=`<text class="ax" x="${x+5}" y="17">${fmt(t).slice(3)}</text>`;
+    if(isDay) g+=`<text class="axd" x="${x+5}" y="17" dx="42">${fmt(t).slice(0,2)}</text>`;
+  }
+
+  /* lane bands */
+  RB.r.filter(r=>r.type==='lane').forEach((r,i)=>{
+    const down=offline.has(r.lane.id);
+    g+=`<rect x="0" y="${r.y}" width="${W}" height="${LANE_H}" fill="${i%2?'rgba(255,255,255,.012)':'transparent'}"/>`;
+    if(down){
+      g+=`<g class="hatch"><rect x="0" y="${r.y}" width="${W}" height="${LANE_H}" fill="url(#dn)"/></g>`;
+    }
+  });
+
+  /* defs: hatch pattern + arrow */
+  const defs=`<defs>
+    <pattern id="dn" width="9" height="9" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+      <rect width="9" height="9" fill="rgba(194,85,74,.05)"/>
+      <line x1="0" y1="0" x2="0" y2="9" stroke="rgba(194,85,74,.28)" stroke-width="2"/>
+    </pattern></defs>`;
+
+  /* jobs: edges first, then bars */
+  jobs.forEach(j=>{
+    const dim = focusId && focusId!==j.id ? ' dim' : '';
+    const nById={}; j.nodes.forEach(n=>nById[n.id]=n);
+    j.edges.forEach(([f,tt,kind])=>{
+      const a=nById[f], b=nById[tt]; if(!a||!b) return;
+      const x1=X(a.t1), y1=laneY(a.lane), x2=X(b.t0), y2=laneY(b.lane);
+      const dash = kind==='hold' ? 'stroke-dasharray="2 5"' : 'stroke-dasharray="1 4"';
+      const col = kind==='hold' ? 'var(--txt-faint)' : j.color;
+      const mx=(x1+x2)/2;
+      g+=`<path class="edge${dim}" d="M${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}"
+            stroke="${col}" stroke-width="1.4" ${dash} opacity=".75"/>`;
+    });
+  });
+  jobs.forEach(j=>{
+    const dim = focusId && focusId!==j.id ? ' dim' : '';
+    j.nodes.forEach(n=>{
+      const y=laneY(n.lane), x0=X(n.t0), x1=X(n.t1);
+      const past = n.t1 < nowT ? ' past' : '';
+      const live = (nowT>=n.t0 && nowT<=n.t1 && n.kind==='run');
+      if(n.kind==='hold'){
+        g+=`<rect class="seg-bar${dim}" x="${x0}" y="${y-4}" width="${Math.max(2,x1-x0)}" height="8"
+              rx="4" fill="none" stroke="var(--txt-faint)" stroke-width="1.4" stroke-dasharray="3 3"
+              data-j="${j.id}" data-n="${n.id}"/>`;
+        g+=`<text x="${(x0+x1)/2}" y="${y-9}" text-anchor="middle" font-size="9.5"
+              font-family="var(--mono)" fill="var(--txt-faint)" letter-spacing=".08em">HOLD · AWAITING PKG</text>`;
+      } else {
+        const op = n.deferred ? '.45' : (past?'.5':'1');
+        g+=`<line class="seg-bar${dim}${past}" x1="${x0}" y1="${y}" x2="${x1}" y2="${y}"
+              stroke="${j.color}" stroke-width="9" data-j="${j.id}" data-n="${n.id}" opacity="${op}"/>`;
+        if(live) g+=`<circle cx="${X(nowT)}" cy="${y}" r="6" fill="none" stroke="${j.color}" stroke-width="2">
+              <animate attributeName="r" values="5;9;5" dur="1.4s" repeatCount="indefinite"/>
+              <animate attributeName="opacity" values="1;.2;1" dur="1.4s" repeatCount="indefinite"/></circle>`;
+        if((x1-x0)>34){
+          g+=`<text class="seg-bar${dim}" x="${x0+6}" y="${y-8}" font-size="10.5"
+                fill="${j.color}" data-j="${j.id}" data-n="${n.id}"
+                font-family="var(--mono)" opacity="${op}">${j.label}${n._rerouted?' ↻':''}</text>`;
+        }
+      }
+    });
+  });
+
+  /* now-line */
+  if(nowT>=S.span[0]&&nowT<=S.span[1]){
+    const nx=X(nowT);
+    g+=`<line x1="${nx}" y1="${HDR_H}" x2="${nx}" y2="${H}" stroke="var(--now)" stroke-width="1.4"/>
+        <path d="M${nx-5} ${HDR_H} L${nx+5} ${HDR_H} L${nx} ${HDR_H+7} Z" fill="var(--now)"/>
+        <text class="ax" x="${nx+7}" y="${HDR_H-7}" fill="var(--now)" font-weight="500">NOW ${fmt(nowT)}</text>`;
+  }
+
+  svg.innerHTML=defs+g;
+  renderLabels(); attachHover();
+}
+
+function renderLabels(){
+  const L=el('labels'); let h='';
+  RB.r.forEach(r=>{
+    if(r.type==='hdr'){
+      h+=`<div class="grp-l ${r.group}">${r.group==='press'?'Press — tablet / capsule':'Packaging'}</div>`;
+    } else {
+      const down=offline.has(r.lane.id);
+      h+=`<div class="lane-l ${r.lane.group}${down?' down':''}">
+            <span>${r.lane.name}</span>
+            <span class="cap">${down?'OFFLINE':r.lane.capacity}</span></div>`;
+    }
+  });
+  L.innerHTML=h;
+}
+
+/* ---- legend ---- */
+function renderLegend(){
+  const seen=new Set(); let h='';
+  S.jobs.concat(extraJobs).forEach(j=>{
+    const k=j.id.split('·')[0];
+    if(seen.has(k)) return; seen.add(k);
+    h+=`<div class="chip" data-j="${j.id}">
+          <span class="swatch" style="background:${j.color}"></span>${k}
+          <span style="color:var(--txt-faint)">${j.meta.qty}</span></div>`;
+  });
+  el('legend').innerHTML=h;
+  el('legend').querySelectorAll('.chip').forEach(c=>{
+    const id=c.dataset.j;
+    c.onclick=()=>{ focusId = focusId===id?null:id; syncChips(); render(); };
+  });
+}
+function syncChips(){
+  el('legend').querySelectorAll('.chip').forEach(c=>
+    c.classList.toggle('on', focusId && c.dataset.j.split('·')[0]===focusId.split('·')[0]));
+}
+
+/* ---- hover / tooltip ---- */
+function attachHover(){
+  const tip=el('tip');
+  el('plot').querySelectorAll('[data-j]').forEach(node=>{
+    node.addEventListener('mouseenter',e=>{
+      const jid=node.dataset.j, nid=node.dataset.n;
+      focusId=jid; syncChips(); render();
+      const j=jobs.find(x=>x.id===jid)||S.jobs.find(x=>x.id===jid);
+      const n=j.nodes.find(x=>x.id===nid);
+      const lane=lanesById[n.lane];
+      const st = n.kind==='hold'?'<span class="tag hold">HOLD</span>'
+               : (nowT>=n.t0&&nowT<=n.t1)?'<span class="tag run">RUNNING</span>'
+               : nowT<n.t0?'<span class="tag queue">QUEUED</span>'
+               : '<span class="tag queue">DONE</span>';
+      tip.innerHTML=`<h4><span class="sw" style="background:${j.color}"></span>${j.label} ${st}</h4>
+        <div class="r"><span>Order</span><b>${j.meta.order}</b></div>
+        <div class="r"><span>Quantity</span><b>${j.meta.qty}</b></div>
+        <div class="r"><span>Machine</span><b>${lane.name}${n._rerouted?' (rerouted)':''}</b></div>
+        <div class="r"><span>Window</span><b>${fmt(n.t0)} → ${fmt(n.t1)}</b></div>
+        <div class="r"><span>Routing</span><b>${j.meta.pin}</b></div>`;
+      tip.style.opacity=1;
+    });
+    node.addEventListener('mousemove',e=>{
+      const t=el('tip'), pad=14;
+      let x=e.clientX+pad, y=e.clientY+pad;
+      if(x+230>innerWidth) x=e.clientX-230;
+      if(y+170>innerHeight) y=e.clientY-170;
+      t.style.left=x+'px'; t.style.top=y+'px';
+    });
+    node.addEventListener('mouseleave',()=>{
+      el('tip').style.opacity=0; focusId=null; syncChips(); render();
+    });
+  });
+}
+
+/* ---- toast ---- */
+function toast(html){
+  const t=el('toast'); t.innerHTML=html; t.classList.add('show');
+  clearTimeout(t._x); t._x=setTimeout(()=>t.classList.remove('show'),3400);
+}
+
+/* ---- controls ---- */
+el('zoom').querySelectorAll('button').forEach(b=>{
+  b.onclick=()=>{ el('zoom').querySelectorAll('button').forEach(x=>x.classList.remove('on'));
+    b.classList.add('on'); zoom=b.dataset.z; render(); };
+});
+S.lanes.filter(l=>l.group==='press').forEach(l=>{
+  const o=document.createElement('option'); o.value=l.id; o.textContent=l.name; el('downSel').appendChild(o);
+});
+el('downSel').onchange=e=>{
+  offline.clear();
+  if(e.target.value){ offline.add(e.target.value);
+    toast(`<b>${lanesById[e.target.value].name} offline.</b> Queued jobs auto-rerouted.`); }
+  render();
+};
+el('resetBtn').onclick=()=>{ stopSim(); offline.clear(); el('downSel').value='';
+  extraJobs=[]; firedDown=firedIngest=false; nowT=-90; focusId=null;
+  el('feed').classList.remove('live'); el('feedTxt').textContent='FEED IDLE — press ▶ to simulate';
+  renderLegend(); render(); };
+
+function stopSim(){ simulating=false; clearInterval(timer); timer=null;
+  const b=el('playBtn'); b.textContent='▶ Simulate live'; b.classList.remove('running');
+  el('feed').classList.remove('live'); }
+el('playBtn').onclick=()=>{
+  if(simulating){ stopSim(); el('feedTxt').textContent='FEED PAUSED'; return; }
+  simulating=true;
+  const b=el('playBtn'); b.textContent='⏸ Pause'; b.classList.add('running');
+  el('feed').classList.add('live');
+  el('feedTxt').textContent='LIVE — Monday → n8n → SSE (simulated)';
+  timer=setInterval(()=>{
+    nowT+=6;
+    if(!firedDown && nowT>=260){ firedDown=true; offline.add('houd'); el('downSel').value='houd';
+      toast(`<b>Houdini went down.</b> N2216·B rerouted to Merlin automatically.`); }
+    if(!firedIngest && nowT>=720){ firedIngest=true; extraJobs=[incomingJob()];
+      renderLegend(); toast(`<b>New PO ingested:</b> N2231 — trade-show rush, slotted on Merlin.`); }
+    if(nowT>S.span[1]){ stopSim(); el('feedTxt').textContent='FEED IDLE — schedule horizon reached'; }
+    render();
+  },110);
+};
+
+window.addEventListener('resize',()=>{ if(zoom==='fit') render(); });
+renderLegend(); render();
+</script>
+</body>
+</html>

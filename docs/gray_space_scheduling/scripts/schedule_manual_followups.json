@@ -1,0 +1,17 @@
+{
+  "board_id": 18414776220,
+  "unsupported_columns": [
+    {
+      "title": "Job Reference",
+      "type": "board_relation"
+    },
+    {
+      "title": "Machine",
+      "type": "board_relation"
+    },
+    {
+      "title": "Capacity (mirror)",
+      "type": "mirror"
+    }
+  ]
+}
