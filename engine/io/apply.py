@@ -135,6 +135,9 @@ def _build_column_values(
     if write.n_number is not None:
         cv[cols.n_number] = write.n_number
 
+    if write.flavor is not None:
+        cv[cols.flavor] = write.flavor
+
     # Echo-guard hash always present on engine writes.
     cv[cols.last_reflow_hash] = reflow_hash
 
@@ -167,6 +170,7 @@ def _slot_field_to_column_id(field_name: str, cols: ScheduleCols) -> str | None:
         "last_reflow_hash": cols.last_reflow_hash,
         "drift_last_detected_at": cols.drift_last_detected_at,
         "n_number": cols.n_number,
+        "flavor": cols.flavor,
     }
     return mapping.get(field_name)
 

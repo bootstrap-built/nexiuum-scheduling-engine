@@ -60,6 +60,7 @@ def _slot_to_dict(s: Slot) -> dict[str, Any]:
         "recipe_version": s.recipe_version,
         "quantity": s.quantity,
         "n_number": s.n_number,
+        "flavor": s.flavor,
         "planned_start": _iso(s.planned_start),
         "planned_end": _iso(s.planned_end),
         "actual_start": _iso(s.actual_start),
@@ -93,7 +94,7 @@ def _snapshot_to_dict(snap: Snapshot, enrich: dict[str, dict[str, Any]]) -> dict
         # presented as a slot identity.
         job_label = meta.get("job_label")
         effective_n = s.n_number or (job_label if is_n_number(job_label) else None)
-        d["lane_label"] = compose_lane_label(effective_n, None, s.id)
+        d["lane_label"] = compose_lane_label(effective_n, s.flavor, s.id)
         slot_dicts.append(d)
     return {
         "read_at": _iso(snap.read_at),
@@ -400,7 +401,7 @@ function render() {
       row.className = 'lane-l ' + g + (m.status === 'Online' ? '' : ' down');
       const cap = m.capacity_per_hour ? (m.capacity_per_hour/1000).toFixed(0) + 'k/hr' : '';
       const downTag = m.status === 'Online' ? '' : ' · ' + m.status.toLowerCase();
-      row.innerHTML = `<span>${m.name}</span><span class="cap">${cap}${downTag}</span>`;
+      row.innerHTML = `<span>${esc(m.name)}</span><span class="cap">${esc(cap)}${esc(downTag)}</span>`;
       labels.appendChild(row);
       laneIndex.set(m.id, idx);
       idx++;
@@ -611,6 +612,18 @@ function render() {
   m.textContent = `${mc} machines · ${sc} slot${sc === 1 ? '' : 's'} · snapshot ${snap.read_at ? new Date(snap.read_at).toLocaleString('en-US',{hour:'numeric',minute:'2-digit',second:'2-digit'}) : '—'}`;
 }
 
+// Escape user-data before it goes into innerHTML. Flavor (and the N#
+// identity that folds into lane_label) originate from the spec-sheet form —
+// free text an operator types. Without escaping, a flavor like
+// `<img src=x onerror=...>` would execute when an operator opens the popover
+// (stored XSS on this internal dashboard). The SVG bar label uses textContent
+// and is already safe; this guards the innerHTML popover + lane-label paths.
+function esc(v) {
+  return String(v == null ? '' : v).replace(/[&<>"']/g, c => (
+    {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]
+  ));
+}
+
 // Render the popout content for `s`. `keepPosition` skips repositioning
 // (used during background refresh when the popout is already pinned).
 function renderTip(s, color, keepPosition) {
@@ -625,14 +638,15 @@ function renderTip(s, color, keepPosition) {
   const subParts = [];
   if (s.job_name) subParts.push(s.job_name);
   if (s.job_client && (!s.job_name || !s.job_name.includes(s.job_client))) subParts.push(s.job_client);
-  const subline = subParts.length ? `<div class="sub">${subParts.join(' · ')}</div>` : '';
+  const subline = subParts.length ? `<div class="sub">${subParts.map(esc).join(' · ')}</div>` : '';
   tip.innerHTML = `
     <button class="close" aria-label="Close" title="Close (esc)">&times;</button>
-    <h4><span class="sw" style="background:${color}"></span><span class="ttl">${title}</span>
-      <span class="tag ${status}">${(s.status||'').toUpperCase()}</span>${driftTag}</h4>
+    <h4><span class="sw" style="background:${color}"></span><span class="ttl">${esc(title)}</span>
+      <span class="tag ${status}">${esc((s.status||'').toUpperCase())}</span>${driftTag}</h4>
     ${subline}
-    ${s.job_active ? `<div class="r"><span>active</span><b>${s.job_active}</b></div>` : ''}
-    <div class="r"><span>recipe</span><b>${s.recipe_key || '—'}${s.recipe_version ? ' v' + s.recipe_version : ''}</b></div>
+    ${s.job_active ? `<div class="r"><span>active</span><b>${esc(s.job_active)}</b></div>` : ''}
+    ${s.flavor ? `<div class="r"><span>flavor</span><b>${esc(s.flavor)}</b></div>` : ''}
+    <div class="r"><span>recipe</span><b>${esc(s.recipe_key) || '—'}${s.recipe_version ? ' v' + esc(s.recipe_version) : ''}</b></div>
     <div class="r"><span>quantity</span><b>${s.quantity ? s.quantity.toLocaleString() : '—'}</b></div>
     <div class="sep"></div>
     <div class="r"><span>planned start</span><b>${ps ? fmtTime(new Date(ps)) : '—'}</b></div>

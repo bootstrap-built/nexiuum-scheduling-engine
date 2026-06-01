@@ -240,6 +240,49 @@ def test_single_stage_press_basic():
     assert w.planned_end == NOW + timedelta(hours=5)
 
 
+def test_new_placement_stamps_flavor_and_composes_name():
+    """A new placement carries the order's flavor onto its SlotWrite and
+    folds it into the composed slot name alongside the N#."""
+    snap = _snap([_machine("Gandalf", capacity=40000)], [_recipe_press_only()])
+    order = _order(quantity=200000, n_number="N12345", flavor="Strawberry Banana")
+    plan = plan_for_new_order(snap, order, now=NOW)
+    w = plan.slot_writes[0]
+    assert w.flavor == "Strawberry Banana"
+    assert w.name == "N12345 · Strawberry Banana → press"
+
+
+def test_every_slot_write_carries_flavor_on_split():
+    """Flavor lands on every emitted SlotWrite, not just the press stage —
+    each of the four clamshell slots gets it."""
+    machines = [
+        _machine("Gandalf", process_group="Pressing", capacity=40000),
+        _machine("Blister1", process_group="Blister", capacity=4000),
+        _machine("LotCoder1", process_group="Lot Coder", capacity=7000),
+        _machine("Clamshell1", process_group="Clamshell", capacity=3200),
+    ]
+    order = ScheduleNewOrder(
+        job_reference_id="N0001",
+        recipe_key="clamshell-tablet",
+        recipe_version=1,
+        quantity=100000,
+        flavor="Blueberry",
+    )
+    snap = _snap(machines, [_recipe_clamshell()])
+    plan = plan_for_new_order(snap, order, now=NOW)
+    assert len(plan.slot_writes) == 4
+    assert all(w.flavor == "Blueberry" for w in plan.slot_writes)
+
+
+def test_new_placement_flavor_none_unchanged():
+    """No flavor on the order → SlotWrite.flavor is None and the composed
+    name is N#-only (the #4 behaviour is unchanged)."""
+    snap = _snap([_machine("Gandalf", capacity=40000)], [_recipe_press_only()])
+    order = _order(quantity=200000, n_number="N12345")
+    w = plan_for_new_order(snap, order, now=NOW).slot_writes[0]
+    assert w.flavor is None
+    assert w.name == "N12345 → press"
+
+
 def test_single_stage_picks_fastest_finishing_machine():
     """Between two empty machines, picks the one that finishes first."""
     gandalf = _machine("Gandalf", capacity=40000)  # 200k → 5hr
