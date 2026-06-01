@@ -493,3 +493,41 @@ async def test_process_event_spec_sheet_unsupported_product_logged_no_raise():
 
     assert result is None
     mock_apply.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_process_event_spec_sheet_payload_absent_skips_quietly(caplog):
+    """A payload-less item (non-Nexiuum item on the shared board) is skipped
+    quietly — info log, no apply, and NOT logged as an ingest failure.
+
+    create_pulse fires for every new Production Schedule item, including the
+    regular production flow's items that carry no Spec Sheet Payload. Those
+    must not read as errors (Issue #8)."""
+    import logging
+
+    from engine.models import SpecSheetItemReady
+    from engine.io.spec_sheet_io import SpecSheetPayloadAbsent
+
+    with (
+        patch("engine.io.worker.read_snapshot", new_callable=AsyncMock) as mock_snap,
+        patch("engine.io.worker.apply_plan", new_callable=AsyncMock) as mock_apply,
+        patch("engine.io.worker.now_local", return_value=NOW),
+        patch(
+            "engine.io.worker.read_ps_item_for_ingest",
+            new_callable=AsyncMock,
+        ) as mock_read,
+    ):
+        mock_snap.return_value = _fake_snapshot()
+        mock_read.side_effect = SpecSheetPayloadAbsent("ps-45 has no payload")
+
+        with caplog.at_level(logging.INFO, logger="engine.io.worker"):
+            result = await process_event(SpecSheetItemReady(item_id="ps-45"))
+
+    assert result is None
+    mock_apply.assert_not_called()
+    # Skipped at info level, never logged as an error.
+    assert any(
+        r.levelno == logging.INFO and "skipped" in r.getMessage()
+        for r in caplog.records
+    )
+    assert not any(r.levelno >= logging.ERROR for r in caplog.records)

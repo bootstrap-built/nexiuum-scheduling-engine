@@ -218,12 +218,19 @@ def _resolve_actual_at(event: dict[str, Any], factory_tz: str):
 async def webhook_monday_spec_sheet(secret: str, request: Request) -> dict[str, Any]:
     """Phase 2D — receive a "schedule this Production Schedule item" trigger.
 
-    Wired up as a Monday automation HTTP webhook on the Production
-    Schedule board (8196668916). The automation fires when the operator
-    flips a column to indicate the item is ready to schedule (Status →
-    "Ready to Schedule", or equivalently a Recipe Key column gets set —
-    the exact trigger column is configured Monday-side; engine doesn't
-    care which column changed, just that something on this board did).
+    Wired up as a Monday `create_webhook` on the Production Schedule
+    board (8196668916) with event `create_pulse` — it fires once per new
+    item. The Nexiuum spec-sheet form creates fully-populated items
+    (Spec Sheet Payload + Nexiuum # set atomically at creation), so
+    everything the engine reads is present at create time; a column-change
+    trigger would never fire because Monday emits no column-change events
+    for creation-time values (verified against order N3851, Issue #8).
+
+    The board is shared with the regular production flow (Gray Space POs,
+    samples) whose items have no Spec Sheet Payload. create_pulse fires for
+    those too; the worker reads, finds no payload, and skips them quietly
+    (SpecSheetPayloadAbsent → info, not an ingest failure). The handler
+    stays event-agnostic — it just needs boardId + pulseId.
 
     Engine:
     1. Verifies the URL secret (constant-time compare, same pattern as
