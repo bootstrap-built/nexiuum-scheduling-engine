@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from engine.io.apply import ApplyResult
+from engine.io.spec_sheet_io import PSItemIngest
 from engine.io.worker import (
     WorkerNotRunning,
     enqueue_event,
@@ -403,19 +404,25 @@ async def test_process_event_spec_sheet_item_ready_schedules():
         patch("engine.io.worker.apply_plan", new_callable=AsyncMock) as mock_apply,
         patch("engine.io.worker.now_local", return_value=NOW),
         patch(
-            "engine.io.worker.read_spec_sheet_payload_for_item",
+            "engine.io.worker.read_ps_item_for_ingest",
             new_callable=AsyncMock,
         ) as mock_read,
     ):
         mock_snap.return_value = _fake_snapshot()
         mock_apply.return_value = fake_result
-        mock_read.return_value = _json.dumps(payload)
+        mock_read.return_value = PSItemIngest(
+            payload_text=_json.dumps(payload), n_number="N777"
+        )
 
         result = await process_event(SpecSheetItemReady(item_id="ps-42"))
 
     assert result is fake_result
     mock_read.assert_awaited_once_with("ps-42")
     mock_apply.assert_awaited_once()
+    # N# from the reader propagates onto every emitted SlotWrite.
+    applied_plan = mock_apply.call_args.args[0]
+    assert applied_plan.slot_writes
+    assert all(w.n_number == "N777" for w in applied_plan.slot_writes)
 
 
 @pytest.mark.asyncio
@@ -438,12 +445,14 @@ async def test_process_event_spec_sheet_samples_route_skipped():
         patch("engine.io.worker.apply_plan", new_callable=AsyncMock) as mock_apply,
         patch("engine.io.worker.now_local", return_value=NOW),
         patch(
-            "engine.io.worker.read_spec_sheet_payload_for_item",
+            "engine.io.worker.read_ps_item_for_ingest",
             new_callable=AsyncMock,
         ) as mock_read,
     ):
         mock_snap.return_value = _fake_snapshot()
-        mock_read.return_value = _json.dumps(payload)
+        mock_read.return_value = PSItemIngest(
+            payload_text=_json.dumps(payload), n_number="N777"
+        )
 
         result = await process_event(SpecSheetItemReady(item_id="ps-43"))
 
@@ -471,12 +480,14 @@ async def test_process_event_spec_sheet_unsupported_product_logged_no_raise():
         patch("engine.io.worker.apply_plan", new_callable=AsyncMock) as mock_apply,
         patch("engine.io.worker.now_local", return_value=NOW),
         patch(
-            "engine.io.worker.read_spec_sheet_payload_for_item",
+            "engine.io.worker.read_ps_item_for_ingest",
             new_callable=AsyncMock,
         ) as mock_read,
     ):
         mock_snap.return_value = _fake_snapshot()
-        mock_read.return_value = _json.dumps(payload)
+        mock_read.return_value = PSItemIngest(
+            payload_text=_json.dumps(payload), n_number="N777"
+        )
 
         result = await process_event(SpecSheetItemReady(item_id="ps-44"))
 

@@ -93,6 +93,64 @@ def test_column_values_create_slot_full_payload():
     assert cv[SETTINGS.col_schedule_last_reflow_hash] == "abc123"
 
 
+def test_column_values_writes_n_number_when_present():
+    """A SlotWrite carrying an N# serializes into the N# text column."""
+    w = SlotWrite(slot_id=None, machine_id="12047953695", quantity=100, n_number="N3629")
+    cv = _build_cv(w, SETTINGS, "h1")
+    assert cv[SETTINGS.col_schedule_n_number] == "N3629"
+
+
+def test_column_values_omits_n_number_when_none():
+    """n_number=None means don't-touch — no N# column write."""
+    w = SlotWrite(slot_id="X", machine_id="12047953695")
+    cv = _build_cv(w, SETTINGS, "h1")
+    assert SETTINGS.col_schedule_n_number not in cv
+
+
+def test_n_number_round_trips_write_then_read():
+    """N# survives the write → re-read cycle: the apply serializer writes
+    the same column id the snapshot parser reads, on both instances.
+
+    This is the round-trip guarantee baton-pass / future reflow rely on —
+    N# present on Slot reads without re-fetching from upstream.
+    """
+    from engine.io.snapshot import _parse_slot
+
+    for instance in ("gray_space", "nexiuum"):
+        cols = SETTINGS.schedule_cols(instance)
+        # Write side: SlotWrite → column_values.
+        w = SlotWrite(
+            slot_id=None, machine_id="1", quantity=10,
+            n_number="N42", instance=instance,
+        )
+        cv = _build_column_values(w, cols, SETTINGS, "rh")
+        assert cv[cols.n_number] == "N42"
+
+        # Read side: a Monday item carrying that column → Slot.n_number.
+        item = {
+            "id": "slot-1",
+            "name": "whatever",
+            "column_values": [{"id": cols.n_number, "text": "N42"}],
+        }
+        slot = _parse_slot(item, SETTINGS, instance=instance)
+        assert slot.n_number == "N42"
+
+
+def test_parse_slot_n_number_none_when_column_blank():
+    """A blank/absent N# column reads back as None, not ''."""
+    from engine.io.snapshot import _parse_slot
+
+    cols = SETTINGS.schedule_cols("gray_space")
+    item = {
+        "id": "slot-2", "name": "x",
+        "column_values": [{"id": cols.n_number, "text": ""}],
+    }
+    assert _parse_slot(item, SETTINGS, instance="gray_space").n_number is None
+    # Column entirely absent.
+    item2 = {"id": "slot-3", "name": "x", "column_values": []}
+    assert _parse_slot(item2, SETTINGS, instance="gray_space").n_number is None
+
+
 def test_column_values_skips_simulate_job_id():
     """SIMULATE_JOB_ID sentinel must never get sent as a real Job Reference link."""
     w = SlotWrite(

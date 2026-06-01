@@ -338,3 +338,18 @@ def test_build_schedule_order_propagates_dual_sided():
     p = parse_spec_sheet_payload(_payload_json(is_dual=True))
     order = build_schedule_order(p, job_reference_id="ps-1")
     assert order.dual_sided is True
+
+
+def test_build_schedule_order_threads_n_number():
+    """The N# the IO shell read off the PS item lands on the order."""
+    p = parse_spec_sheet_payload(_payload_json())
+    order = build_schedule_order(p, job_reference_id="ps-1", n_number="N3629")
+    assert order.n_number == "N3629"
+
+
+def test_build_schedule_order_n_number_defaults_to_none():
+    """Legacy / unlinked items: no N# supplied → order.n_number is None,
+    never raises (it's a label, not a key)."""
+    p = parse_spec_sheet_payload(_payload_json())
+    order = build_schedule_order(p, job_reference_id="ps-1")
+    assert order.n_number is None

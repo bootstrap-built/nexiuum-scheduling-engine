@@ -241,6 +241,8 @@ class MondayClient:
                   id
                   text
                   value
+                  ... on BoardRelationValue { display_value }
+                  ... on MirrorValue { display_value }
                 }
               }
             }

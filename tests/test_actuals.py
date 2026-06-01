@@ -583,3 +583,59 @@ def test_baton_pass_pushes_synthetic_packaging_slots():
     expected_start = actual_at.replace(hour=12, minute=30)
     assert by_slot["pkg-clam-1"].planned_start == expected_start
     assert by_slot["pkg-sach-1"].planned_start == expected_start
+
+
+# ─── N# propagation: writes originating from an existing Slot copy its N# ──
+# Round-trip guarantee — N# survives Snapshot → SlotWrite → board → next
+# Snapshot. A silent regression here would drop N# off update writes.
+
+from dataclasses import replace  # noqa: E402
+
+
+def test_actual_start_write_preserves_n_number():
+    slot = replace(_slot(status=SlotStatus.QUEUED), n_number="N3629")
+    snap = _snapshot((slot,))
+    event = ActualStartReported(job_reference_id="J1", stage_id="press", actual_at=ACTUAL_AT)
+    plan = plan_for_actual_start(snap, event)
+    assert plan.slot_writes
+    assert all(w.n_number == "N3629" for w in plan.slot_writes)
+
+
+def test_actual_end_write_preserves_n_number():
+    slot = replace(
+        _slot(status=SlotStatus.RUNNING, actual_start=NOW), n_number="N3629",
+    )
+    snap = _snapshot((slot,))
+    event = ActualEndReported(job_reference_id="J1", stage_id="press", actual_at=ACTUAL_AT)
+    plan = plan_for_actual_end(snap, event, handoff_buffer_minutes=30)
+    assert plan.slot_writes
+    # The finishing slot's write carries the N#.
+    finishing = [w for w in plan.slot_writes if w.slot_id == "S1"]
+    assert finishing and finishing[0].n_number == "N3629"
+
+
+def test_baton_pass_write_preserves_dependent_slot_n_number():
+    """A baton-pass write originates from the dependent Slot — it copies that
+    Slot's N#, not the finishing slot's."""
+    actual_at = NOW.replace(hour=11)
+    press = replace(
+        _multistage_slot(
+            id_="press-1", stage_id="press",
+            status=SlotStatus.RUNNING, actual_start=NOW,
+            planned_start=NOW, planned_end=NOW.replace(hour=11),
+        ),
+        n_number="N3629",
+    )
+    blister = replace(
+        _multistage_slot(
+            id_="blister-1", stage_id="blister",
+            planned_start=NOW.replace(hour=11), planned_end=NOW.replace(hour=14),
+        ),
+        n_number="N3629",
+    )
+    snap = _multistage_snapshot((press, blister))
+    event = ActualEndReported(job_reference_id="J1", stage_id="press", actual_at=actual_at)
+    plan = plan_for_actual_end(snap, event, handoff_buffer_minutes=30)
+    by_slot = {w.slot_id: w for w in plan.slot_writes}
+    assert by_slot["blister-1"].planned_start is not None  # was pushed
+    assert by_slot["blister-1"].n_number == "N3629"

@@ -20,6 +20,7 @@ from fastapi import APIRouter
 from fastapi.responses import HTMLResponse
 
 from engine.config import get_settings
+from engine.core.labels import compose_lane_label, is_n_number
 from engine.io.monday import MondayClient, gray_space_client
 from engine.io.snapshot import read_snapshot
 from engine.models import Machine, Slot, Snapshot
@@ -58,6 +59,7 @@ def _slot_to_dict(s: Slot) -> dict[str, Any]:
         "recipe_key": s.recipe_key,
         "recipe_version": s.recipe_version,
         "quantity": s.quantity,
+        "n_number": s.n_number,
         "planned_start": _iso(s.planned_start),
         "planned_end": _iso(s.planned_end),
         "actual_start": _iso(s.actual_start),
@@ -83,6 +85,15 @@ def _snapshot_to_dict(snap: Snapshot, enrich: dict[str, dict[str, Any]]) -> dict
         d["job_name"] = meta.get("job_name")
         d["job_client"] = meta.get("job_client")
         d["job_active"] = meta.get("job_active")
+        # Lane label via the labels module (single source of truth). The
+        # Slot's own N# wins; for the legacy Gray Space flow (n_number=None)
+        # we fall back to the Blend Records PO Number enrichment (job_label),
+        # which is that flow's N#, before the `#<last-6>` fallback. Guard the
+        # enrichment with is_n_number so a non-N# PO-Number value doesn't get
+        # presented as a slot identity.
+        job_label = meta.get("job_label")
+        effective_n = s.n_number or (job_label if is_n_number(job_label) else None)
+        d["lane_label"] = compose_lane_label(effective_n, None, s.id)
         slot_dicts.append(d)
     return {
         "read_at": _iso(snap.read_at),
@@ -558,15 +569,16 @@ function render() {
       g.appendChild(drift);
     }
 
-    // Bar label: N# (PO Number) is the human identifier. Fall back to the
-    // last 6 digits of the pulse id when the seed item hasn't been enriched.
+    // Bar label: the engine-composed lane_label (N# identity, via
+    // engine.core.labels). Falls back to the legacy job_label/last-6 chain
+    // only if an older snapshot lacks lane_label.
     if (w > 60) {
       const t = document.createElementNS(ns, 'text');
       t.setAttribute('x', bx0 + 8); t.setAttribute('y', ly + 4);
       t.setAttribute('fill', '#0a0c10'); t.setAttribute('font-size', 11);
       t.setAttribute('font-weight', 600);
       t.setAttribute('pointer-events', 'none');
-      const id = s.job_label || (s.job_reference_id ? '#' + s.job_reference_id.slice(-6) : s.name.slice(0, 18));
+      const id = s.lane_label || s.job_label || (s.job_reference_id ? '#' + s.job_reference_id.slice(-6) : s.name.slice(0, 18));
       t.textContent = id + ' · ' + (s.quantity ? s.quantity.toLocaleString() : '');
       g.appendChild(t);
     }
@@ -607,8 +619,9 @@ function renderTip(s, color, keepPosition) {
   const pe = s.actual_end || s.planned_end;
   const status = (s.status || '').toLowerCase();
   const driftTag = s.drift_last_detected_at ? '<span class="tag drift">DRIFT</span>' : '';
-  // Title prefers the N# (job_label); name + client read as the subline.
-  const title = s.job_label || (s.job_reference_id ? '#' + s.job_reference_id.slice(-6) : s.name || 'Slot ' + s.id);
+  // Title prefers the engine-composed lane_label (N# identity); name +
+  // client read as the subline.
+  const title = s.lane_label || s.job_label || (s.job_reference_id ? '#' + s.job_reference_id.slice(-6) : s.name || 'Slot ' + s.id);
   const subParts = [];
   if (s.job_name) subParts.push(s.job_name);
   if (s.job_client && (!s.job_name || !s.job_name.includes(s.job_client))) subParts.push(s.job_client);

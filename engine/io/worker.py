@@ -40,7 +40,7 @@ from engine.core.spec_sheet import (
 )
 from engine.io.spec_sheet_io import (
     ProductionScheduleReadError,
-    read_spec_sheet_payload_for_item,
+    read_ps_item_for_ingest,
 )
 from engine.models import (
     ActualEndReported,
@@ -132,9 +132,13 @@ async def process_event(event: Event) -> ApplyResult | None:
         # Monday for the payload happens here (IO shell), translation
         # is pure-core in engine.core.spec_sheet.
         try:
-            payload_text = await read_spec_sheet_payload_for_item(event.item_id)
-            payload = parse_spec_sheet_payload(payload_text)
-            order = build_schedule_order(payload, job_reference_id=event.item_id)
+            ingest = await read_ps_item_for_ingest(event.item_id)
+            payload = parse_spec_sheet_payload(ingest.payload_text)
+            order = build_schedule_order(
+                payload,
+                job_reference_id=event.item_id,
+                n_number=ingest.n_number,
+            )
         except UnsupportedManufacturingRouteError as e:
             log.info(
                 "SpecSheetItemReady item=%s skipped: %s",

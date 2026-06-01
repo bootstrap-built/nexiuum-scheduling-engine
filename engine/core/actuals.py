@@ -82,6 +82,9 @@ def plan_for_actual_start(
                 # Phase 2: inherit instance from the slot so apply_plan
                 # routes the update to the correct Schedule board.
                 instance=slot.instance,
+                # Re-stamp the N# from the existing Slot so it round-trips
+                # (Snapshot → SlotWrite → board → next Snapshot).
+                n_number=slot.n_number,
             )
         )
         notes.append(f"slot {slot.id}: actual_start + Status=Running")
@@ -157,6 +160,8 @@ def plan_for_actual_end(
                 # Phase 2: inherit instance from the slot so apply_plan
                 # routes the update to the correct Schedule board.
                 instance=slot.instance,
+                # Re-stamp the N# from the existing Slot so it round-trips.
+                n_number=slot.n_number,
             )
         )
         notes.append(f"slot {slot.id}: actual_end + Status=Done")
@@ -251,6 +256,9 @@ def plan_for_actual_end(
                         # Nexiuum packaging slot — that write must route to
                         # the Nexiuum Schedule board, not Gray Space.
                         instance=dep_slot.instance,
+                        # Baton-pass writes originate from an existing Slot —
+                        # copy its N# so it survives the write/re-read cycle.
+                        n_number=dep_slot.n_number,
                     )
                 )
                 notes.append(

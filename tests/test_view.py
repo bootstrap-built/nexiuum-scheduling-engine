@@ -36,16 +36,17 @@ def _machine(id: str, name: str, group: str = "Pressing", cap: float = 40000.0,
 
 
 def _slot(id: str, machine_id: str, status: SlotStatus = SlotStatus.QUEUED,
-          drift: datetime | None = None) -> Slot:
+          drift: datetime | None = None, n_number: str | None = None,
+          job_reference_id: str = "11801201557") -> Slot:
     return Slot(
-        id=id, name=f"slot {id}", job_reference_id="11801201557",
+        id=id, name=f"slot {id}", job_reference_id=job_reference_id,
         machine_id=machine_id, stage_id="press",
         recipe_key="tablet-press-standard", recipe_version=1, quantity=50000,
         planned_start=NOW, planned_end=NOW,
         actual_start=None, actual_end=None,
         dependent_on_ids=(), status=status, manually_placed=False,
         priority=Priority.NORMAL, last_reflow_hash=None,
-        drift_last_detected_at=drift,
+        drift_last_detected_at=drift, n_number=n_number,
     )
 
 
@@ -134,6 +135,38 @@ def test_schedule_json_merges_blend_enrichment():
     # Orphan slot: enrichment fields present but null
     assert by_id["S2"]["job_label"] is None
     assert by_id["S2"]["job_client"] is None
+
+
+def test_schedule_json_includes_n_number_and_lane_label():
+    """Every slot object carries n_number, plus a composed lane_label:
+    - Slot's own N# wins (Phase 2D flow).
+    - Legacy GS (n_number=None) falls back to the Blend Records job_label.
+    - Neither → '#<last-6-of-slot-id>'.
+    """
+    snap = _snap(
+        [_machine("M1", "Gandalf")],
+        [
+            _slot("S1", "M1", n_number="N3629"),            # Phase 2D
+            _slot("S2", "M1", job_reference_id="55501"),    # legacy, enriched
+            _slot("990000777", "M1", job_reference_id="00"),  # no n#, no enrich
+        ],
+    )
+    enrich = {"55501": {"job_label": "N1234", "job_name": None,
+                        "job_client": None, "job_active": None}}
+    with patch("engine.routes.view.read_snapshot", new_callable=AsyncMock) as m, \
+         patch("engine.routes.view._fetch_blend_enrichment", new_callable=AsyncMock) as fe:
+        m.return_value = snap
+        fe.return_value = enrich
+        with TestClient(app) as c:
+            r = c.get("/schedule.json")
+    by_id = {s["id"]: s for s in r.json()["slots"]}
+    # n_number surfaced verbatim (None when the slot has none).
+    assert by_id["S1"]["n_number"] == "N3629"
+    assert by_id["S2"]["n_number"] is None
+    # lane_label composed via the labels module.
+    assert by_id["S1"]["lane_label"] == "N3629"          # own N# wins
+    assert by_id["S2"]["lane_label"] == "N1234"          # falls back to job_label
+    assert by_id["990000777"]["lane_label"] == "#000777"  # last-6 of slot id
 
 
 def test_view_serves_html():

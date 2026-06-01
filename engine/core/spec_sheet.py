@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Annotated, Literal
+from typing import Annotated
 
 from pydantic import BaseModel, Field, ValidationError
 
@@ -282,10 +282,17 @@ def primary_active_mg(payload: SpecSheetPayload) -> float | None:
 
 
 def build_schedule_order(
-    payload: SpecSheetPayload, job_reference_id: str,
+    payload: SpecSheetPayload,
+    job_reference_id: str,
+    n_number: str | None = None,
 ) -> ScheduleNewOrder:
     """High-level builder: parse a payload + apply all the translation
     rules to produce a `ScheduleNewOrder` event.
+
+    `n_number` is the originating PO's traceability number, read by the IO
+    shell from the Production Schedule item's "Nexiuum #" board_relation.
+    Threaded through as a pass-through label; None when the item isn't linked
+    to a PO yet (or for the legacy Gray Space flow that doesn't carry one).
 
     Raises `UnsupportedProductTypeError` or `UnsupportedManufacturingRouteError`
     when the payload shouldn't schedule.
@@ -309,6 +316,7 @@ def build_schedule_order(
         dual_sided=payload.is_dual,
         active_mg=primary_active_mg(payload),
         packaging_breakdown=breakdown,
+        n_number=n_number,
     )
 
 
