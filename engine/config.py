@@ -68,6 +68,10 @@ class ScheduleCols:
     # The engine stamps the originating PO's N# here on every SlotWrite that
     # carries one, so operators can filter/sort the Schedule board by N#.
     n_number: str
+    # Flavor text column (added to both Schedule boards in #3). The engine
+    # stamps the indexed flavor's name here on every SlotWrite that carries
+    # one, so operators see the flavor on the Schedule board and Marey chart.
+    flavor: str
 
 
 class Settings(BaseSettings):
@@ -160,6 +164,7 @@ class Settings(BaseSettings):
     col_schedule_last_reflow_hash: str = "text_mm3hf0h5"
     col_schedule_drift_last_detected_at: str = "date_mm3h9jxp"
     col_schedule_n_number: str = "text_mm3wcm9e"  # "N#" text column (#3)
+    col_schedule_flavor: str = "text_mm3w6p7b"  # "Flavor" text column (#3)
 
     # ── Capacity Engine column IDs ───────────────────────────────────────
     col_cap_status: str = "color_mm3gcye0"
@@ -222,6 +227,7 @@ class Settings(BaseSettings):
     col_nx_schedule_last_reflow_hash: str = "text_mm3prf9j"
     col_nx_schedule_drift_last_detected_at: str = "date_mm3pdj0y"
     col_nx_schedule_n_number: str = "text_mm3w4ghr"  # "N#" text column (#3)
+    col_nx_schedule_flavor: str = "text_mm3w91af"  # "Flavor" text column (#3)
 
     # ── Blend Records column IDs (source board for press actuals) ────────
     col_blend_status: str = "color_mm1mb9cm"  # "Blend Status" — flips to "Pressing" → actual_start
@@ -448,6 +454,7 @@ class Settings(BaseSettings):
                 last_reflow_hash=self.col_nx_schedule_last_reflow_hash,
                 drift_last_detected_at=self.col_nx_schedule_drift_last_detected_at,
                 n_number=self.col_nx_schedule_n_number,
+                flavor=self.col_nx_schedule_flavor,
             )
         return ScheduleCols(
             machine=self.col_schedule_machine,
@@ -469,6 +476,7 @@ class Settings(BaseSettings):
             last_reflow_hash=self.col_schedule_last_reflow_hash,
             drift_last_detected_at=self.col_schedule_drift_last_detected_at,
             n_number=self.col_schedule_n_number,
+            flavor=self.col_schedule_flavor,
         )
 
     def schedule_board(self, instance: Literal["gray_space", "nexiuum"]) -> int:

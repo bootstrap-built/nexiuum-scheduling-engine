@@ -151,6 +151,62 @@ def test_parse_slot_n_number_none_when_column_blank():
     assert _parse_slot(item2, SETTINGS, instance="gray_space").n_number is None
 
 
+def test_column_values_writes_flavor_when_present():
+    """A SlotWrite carrying a flavor serializes into the Flavor text column."""
+    w = SlotWrite(
+        slot_id=None, machine_id="12047953695", quantity=100,
+        flavor="Strawberry Banana",
+    )
+    cv = _build_cv(w, SETTINGS, "h1")
+    assert cv[SETTINGS.col_schedule_flavor] == "Strawberry Banana"
+
+
+def test_column_values_omits_flavor_when_none():
+    """flavor=None means don't-touch — no Flavor column write."""
+    w = SlotWrite(slot_id="X", machine_id="12047953695")
+    cv = _build_cv(w, SETTINGS, "h1")
+    assert SETTINGS.col_schedule_flavor not in cv
+
+
+def test_flavor_round_trips_write_then_read():
+    """Flavor survives the write → re-read cycle: the apply serializer writes
+    the same column id the snapshot parser reads, on both instances —
+    mirroring N#'s round-trip guarantee that baton-pass relies on.
+    """
+    from engine.io.snapshot import _parse_slot
+
+    for instance in ("gray_space", "nexiuum"):
+        cols = SETTINGS.schedule_cols(instance)
+        w = SlotWrite(
+            slot_id=None, machine_id="1", quantity=10,
+            flavor="Blueberry", instance=instance,
+        )
+        cv = _build_column_values(w, cols, SETTINGS, "rh")
+        assert cv[cols.flavor] == "Blueberry"
+
+        item = {
+            "id": "slot-1",
+            "name": "whatever",
+            "column_values": [{"id": cols.flavor, "text": "Blueberry"}],
+        }
+        slot = _parse_slot(item, SETTINGS, instance=instance)
+        assert slot.flavor == "Blueberry"
+
+
+def test_parse_slot_flavor_none_when_column_blank():
+    """A blank/absent Flavor column reads back as None, not ''."""
+    from engine.io.snapshot import _parse_slot
+
+    cols = SETTINGS.schedule_cols("gray_space")
+    item = {
+        "id": "slot-2", "name": "x",
+        "column_values": [{"id": cols.flavor, "text": ""}],
+    }
+    assert _parse_slot(item, SETTINGS, instance="gray_space").flavor is None
+    item2 = {"id": "slot-3", "name": "x", "column_values": []}
+    assert _parse_slot(item2, SETTINGS, instance="gray_space").flavor is None
+
+
 def test_column_values_skips_simulate_job_id():
     """SIMULATE_JOB_ID sentinel must never get sent as a real Job Reference link."""
     w = SlotWrite(

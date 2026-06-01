@@ -286,6 +286,7 @@ def _parse_slot(
         ),
         instance=instance,
         n_number=_text(cv.get(cols.n_number)),
+        flavor=_text(cv.get(cols.flavor)),
     )
 
 

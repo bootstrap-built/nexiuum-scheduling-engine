@@ -85,6 +85,8 @@ def plan_for_actual_start(
                 # Re-stamp the N# from the existing Slot so it round-trips
                 # (Snapshot → SlotWrite → board → next Snapshot).
                 n_number=slot.n_number,
+                # Same for Flavor — copy from the existing Slot.
+                flavor=slot.flavor,
             )
         )
         notes.append(f"slot {slot.id}: actual_start + Status=Running")
@@ -162,6 +164,8 @@ def plan_for_actual_end(
                 instance=slot.instance,
                 # Re-stamp the N# from the existing Slot so it round-trips.
                 n_number=slot.n_number,
+                # Same for Flavor — copy from the existing Slot.
+                flavor=slot.flavor,
             )
         )
         notes.append(f"slot {slot.id}: actual_end + Status=Done")
@@ -259,6 +263,8 @@ def plan_for_actual_end(
                         # Baton-pass writes originate from an existing Slot —
                         # copy its N# so it survives the write/re-read cycle.
                         n_number=dep_slot.n_number,
+                        # Same for Flavor — copy from the dependent Slot.
+                        flavor=dep_slot.flavor,
                     )
                 )
                 notes.append(

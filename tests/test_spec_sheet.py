@@ -353,3 +353,35 @@ def test_build_schedule_order_n_number_defaults_to_none():
     p = parse_spec_sheet_payload(_payload_json())
     order = build_schedule_order(p, job_reference_id="ps-1")
     assert order.n_number is None
+
+
+def test_build_schedule_order_extracts_flavor():
+    """The order carries the indexed flavor's name from the payload."""
+    p = parse_spec_sheet_payload(_payload_json())  # flavors[0].flavor == "Strawberry"
+    order = build_schedule_order(p, job_reference_id="ps-1")
+    assert order.flavor == "Strawberry"
+
+
+def test_build_schedule_order_flavor_uses_indexed_entry():
+    """flavor_index selects which flavor's name lands on the order —
+    the same entry whose qty/breakdown the order already uses."""
+    payload = _payload_dict(
+        flavor_index=1,
+        flavors=[
+            {"flavor": "Strawberry", "qty": 100},
+            {"flavor": "Blueberry Banana", "qty": 200},
+        ],
+    )
+    p = parse_spec_sheet_payload(json.dumps(payload))
+    order = build_schedule_order(p, job_reference_id="ps-1")
+    assert order.flavor == "Blueberry Banana"
+    assert order.quantity == 200  # same indexed entry the qty comes from
+
+
+def test_build_schedule_order_out_of_range_flavor_index_raises():
+    """flavor_index past the end still raises the existing parse error,
+    unchanged by flavor extraction (the breakdown guard fires first)."""
+    payload = _payload_dict(flavor_index=5)  # only 1 flavor
+    p = parse_spec_sheet_payload(json.dumps(payload))
+    with pytest.raises(SpecSheetParseError, match="flavor_index"):
+        build_schedule_order(p, job_reference_id="ps-1")

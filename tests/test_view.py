@@ -37,6 +37,7 @@ def _machine(id: str, name: str, group: str = "Pressing", cap: float = 40000.0,
 
 def _slot(id: str, machine_id: str, status: SlotStatus = SlotStatus.QUEUED,
           drift: datetime | None = None, n_number: str | None = None,
+          flavor: str | None = None,
           job_reference_id: str = "11801201557") -> Slot:
     return Slot(
         id=id, name=f"slot {id}", job_reference_id=job_reference_id,
@@ -46,7 +47,7 @@ def _slot(id: str, machine_id: str, status: SlotStatus = SlotStatus.QUEUED,
         actual_start=None, actual_end=None,
         dependent_on_ids=(), status=status, manually_placed=False,
         priority=Priority.NORMAL, last_reflow_hash=None,
-        drift_last_detected_at=drift, n_number=n_number,
+        drift_last_detected_at=drift, n_number=n_number, flavor=flavor,
     )
 
 
@@ -169,6 +170,33 @@ def test_schedule_json_includes_n_number_and_lane_label():
     assert by_id["990000777"]["lane_label"] == "#000777"  # last-6 of slot id
 
 
+def test_schedule_json_includes_flavor_and_composes_lane_label():
+    """Every slot carries `flavor`, and the lane_label folds it in after the
+    N# (the Phase 2D '<N#> · <Flavor>' identity). Legacy slots without a
+    flavor are unchanged from the #4 N#-only behaviour.
+    """
+    snap = _snap(
+        [_machine("M1", "Gandalf")],
+        [
+            _slot("S1", "M1", n_number="N3629", flavor="Strawberry Banana"),
+            _slot("S2", "M1", n_number="N777"),  # no flavor → N#-only
+        ],
+    )
+    with patch("engine.routes.view.read_snapshot", new_callable=AsyncMock) as m, \
+         patch("engine.routes.view._fetch_blend_enrichment", new_callable=AsyncMock) as fe:
+        m.return_value = snap
+        fe.return_value = {}
+        with TestClient(app) as c:
+            r = c.get("/schedule.json")
+    by_id = {s["id"]: s for s in r.json()["slots"]}
+    # flavor surfaced verbatim (None when absent).
+    assert by_id["S1"]["flavor"] == "Strawberry Banana"
+    assert by_id["S2"]["flavor"] is None
+    # lane_label composes the full identity, untruncated.
+    assert by_id["S1"]["lane_label"] == "N3629 · Strawberry Banana"
+    assert by_id["S2"]["lane_label"] == "N777"  # N#-only, unchanged
+
+
 def test_view_serves_html():
     """/view is reachable and returns HTML containing the renderer."""
     with TestClient(app) as c:
@@ -178,3 +206,19 @@ def test_view_serves_html():
     # Sanity: it embeds the expected JS hook and the JSON endpoint path
     assert "/schedule.json" in r.text
     assert "Production Schedule" in r.text
+
+
+def test_view_escapes_user_data_in_popover():
+    """The popover renders flavor (free text from the spec-sheet form) and the
+    composed title into innerHTML — they must be HTML-escaped, or a flavor like
+    `<img onerror=...>` would be stored XSS on this internal dashboard. Guards
+    against the esc() wrapping being removed.
+    """
+    with TestClient(app) as c:
+        r = c.get("/view")
+    # The escape helper ships, and the untrusted fields are wrapped in it.
+    assert "function esc(" in r.text
+    assert "esc(s.flavor)" in r.text
+    assert "esc(title)" in r.text
+    # Machine name also reaches innerHTML (the lane label row) — escaped too.
+    assert "esc(m.name)" in r.text
