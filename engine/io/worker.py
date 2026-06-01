@@ -40,6 +40,7 @@ from engine.core.spec_sheet import (
 )
 from engine.io.spec_sheet_io import (
     ProductionScheduleReadError,
+    SpecSheetPayloadAbsent,
     read_ps_item_for_ingest,
 )
 from engine.models import (
@@ -151,6 +152,16 @@ async def process_event(event: Event) -> ApplyResult | None:
             # the MVP rollout.
             log.warning(
                 "SpecSheetItemReady item=%s rejected: %s",
+                event.item_id, e,
+            )
+            return None
+        except SpecSheetPayloadAbsent as e:
+            # Shared board: create_pulse fires for every new item, but only
+            # Nexiuum form orders carry a Spec Sheet Payload. No payload =
+            # not ours → skip quietly (info, not error) so the regular
+            # production flow's item creations don't read as ingest failures.
+            log.info(
+                "SpecSheetItemReady item=%s skipped: %s",
                 event.item_id, e,
             )
             return None

@@ -23,6 +23,20 @@ class ProductionScheduleReadError(RuntimeError):
     """
 
 
+class SpecSheetPayloadAbsent(ProductionScheduleReadError):
+    """The item has no Spec Sheet Payload — it isn't a Nexiuum form order.
+
+    The Production Schedule board is shared: the Nexiuum spec-sheet form
+    creates fully-populated items (payload + N# set at creation), but the
+    board also carries the regular production flow (Gray Space POs, samples,
+    etc.) whose items never get a Spec Sheet Payload. The ingest webhook
+    fires on `create_pulse` for *every* new item, so a blank payload is the
+    expected, benign "not for us" case — the worker skips it quietly rather
+    than logging an ingest failure. Subclasses ProductionScheduleReadError
+    so existing broad handlers still catch it.
+    """
+
+
 @dataclass(frozen=True)
 class PSItemIngest:
     """What the engine reads off a Production Schedule item to ingest an Order.
@@ -48,8 +62,11 @@ async def read_ps_item_for_ingest(item_id: str) -> PSItemIngest:
     - The item doesn't exist on the configured board.
     - The Nexiuum token isn't configured (engine wasn't set up for
       Phase 2 dual-instance).
-    - The Spec Sheet Payload column is missing or blank — the form
-      didn't write to this item (something else created it).
+
+    Raises `SpecSheetPayloadAbsent` (a ProductionScheduleReadError subclass)
+    when the Spec Sheet Payload column is missing or blank — the expected,
+    benign case for non-Nexiuum items on this shared board. The worker skips
+    these quietly rather than treating them as ingest failures.
 
     A missing/blank N# is NOT an error — it's a nullable label; the order
     schedules with `n_number=None` and the labels module falls back.
@@ -76,11 +93,11 @@ async def read_ps_item_for_ingest(item_id: str) -> PSItemIngest:
 
     payload_text = _extract_long_text_value(item, s.col_ps_spec_sheet_payload)
     if not payload_text or not payload_text.strip():
-        raise ProductionScheduleReadError(
+        raise SpecSheetPayloadAbsent(
             f"Production Schedule item {item_id} has no Spec Sheet "
             f"Payload value (column {s.col_ps_spec_sheet_payload}). "
-            f"The form may not have written to this item, or the column "
-            f"was cleared by an operator."
+            f"Not a Nexiuum form order (the board is shared with the "
+            f"regular production flow), or the column was cleared."
         )
 
     n_number = _extract_n_number(item, s.col_ps_n_number)

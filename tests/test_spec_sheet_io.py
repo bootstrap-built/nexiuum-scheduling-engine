@@ -16,6 +16,7 @@ from engine.config import get_settings
 from engine.io.spec_sheet_io import (
     PSItemIngest,
     ProductionScheduleReadError,
+    SpecSheetPayloadAbsent,
     _extract_n_number,
     read_ps_item_for_ingest,
 )
@@ -126,7 +127,9 @@ async def test_read_ps_item_for_ingest_n_number_none_is_not_an_error(monkeypatch
 
 @pytest.mark.asyncio
 async def test_read_ps_item_for_ingest_blank_payload_raises(monkeypatch):
-    """A missing/blank Spec Sheet Payload IS a hard error (unlike N#)."""
+    """A missing/blank Spec Sheet Payload raises SpecSheetPayloadAbsent — the
+    benign "not a Nexiuum form order" case the worker skips quietly. Still a
+    ProductionScheduleReadError subclass so broad handlers keep catching it."""
     monkeypatch.setenv("MONDAY_NEXIUUM_TOKEN", "tok")
     fake_item = {
         "id": "ps-3", "name": "x",
@@ -141,5 +144,8 @@ async def test_read_ps_item_for_ingest_blank_payload_raises(monkeypatch):
     client.fetch_item = AsyncMock(return_value=fake_item)
 
     with patch("engine.io.spec_sheet_io.nexiuum_client", return_value=client):
+        with pytest.raises(SpecSheetPayloadAbsent):
+            await read_ps_item_for_ingest("ps-3")
+        # Subclass relationship holds — broad handlers still catch it.
         with pytest.raises(ProductionScheduleReadError):
             await read_ps_item_for_ingest("ps-3")
