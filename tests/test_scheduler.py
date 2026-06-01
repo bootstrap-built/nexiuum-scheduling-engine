@@ -35,6 +35,7 @@ def _machine(
     dual_sided_only: bool = False,
     max_job_size: int | None = None,
     force_route_condition: str | None = None,
+    instance: str = "gray_space",
 ) -> Machine:
     return Machine(
         id=name,
@@ -50,6 +51,7 @@ def _machine(
         max_job_size=max_job_size,
         force_route_condition=force_route_condition,
         last_job_ended_at=None,
+        instance=instance,  # type: ignore[arg-type]
     )
 
 
@@ -223,6 +225,27 @@ def test_unroutable_all_machines_down():
 
 
 # ─── Single-stage placement (Phase 1) ────────────────────────────────────
+
+
+def test_slot_writes_carry_order_origin_instance():
+    """Every SlotWrite records the order's origin instance so the apply layer
+    can decide whether the Job Reference board_relation link is valid (#9).
+    A Nexiuum-origin order's Gray Space press slot has instance='gray_space'
+    but origin_instance='nexiuum' — the cross-instance signal apply guards on."""
+    snap = _snap([_machine("Gandalf", capacity=40000)], [_recipe_press_only()])
+    order = _order(quantity=200000, origin_instance="nexiuum")
+    w = plan_for_new_order(snap, order, now=NOW).slot_writes[0]
+    assert w.instance == "gray_space"  # press machine lives on Gray Space
+    assert w.origin_instance == "nexiuum"
+
+
+def test_slot_writes_default_origin_instance_gray_space():
+    """A legacy order with no origin_instance defaults to gray_space, so Phase 1
+    Gray Space (Blend Records) orders keep their Job Reference link."""
+    snap = _snap([_machine("Gandalf", capacity=40000)], [_recipe_press_only()])
+    w = plan_for_new_order(snap, _order(quantity=200000), now=NOW).slot_writes[0]
+    assert w.instance == "gray_space"
+    assert w.origin_instance == "gray_space"
 
 
 def test_single_stage_press_basic():

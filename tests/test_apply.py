@@ -219,6 +219,47 @@ def test_column_values_skips_simulate_job_id():
     assert SETTINGS.col_schedule_job_reference not in cv
 
 
+def test_column_values_skips_job_reference_when_target_instance_differs_from_origin():
+    """Cross-instance press slot: a Nexiuum-origin order's Gray Space press slot
+    must NOT set the Job Reference board_relation, because the Gray Space Schedule
+    board's Job Reference column is connected to Blend Records, not the Nexiuum
+    Production Schedule item the job_reference_id points at (issue #9)."""
+    w = SlotWrite(
+        slot_id=None,
+        job_reference_id="12152485009",  # a Nexiuum Production Schedule item
+        machine_id="12047953695",
+        quantity=100,
+        instance="gray_space",  # press lands on Gray Space
+        origin_instance="nexiuum",  # but the order originates on Nexiuum
+    )
+    cv = _build_cv(w, SETTINGS, "h1")
+    assert SETTINGS.col_schedule_job_reference not in cv
+
+
+def test_column_values_sets_job_reference_when_instance_matches_origin():
+    """Same-instance write keeps the Job Reference link. A Nexiuum packaging slot
+    on a Nexiuum-origin order, and a Gray Space slot on a Gray Space-origin order,
+    both stay connected (Phase 1 behavior preserved)."""
+    # Gray Space-origin (Phase 1): origin defaults to gray_space.
+    gs = SlotWrite(
+        slot_id=None, job_reference_id="11801201557",
+        machine_id="12047953695", quantity=100,
+    )
+    cv_gs = _build_cv(gs, SETTINGS, "h1")
+    assert cv_gs[SETTINGS.col_schedule_job_reference] == {"item_ids": [11801201557]}
+
+    # Nexiuum-origin packaging slot landing on the Nexiuum Schedule board.
+    nx = SlotWrite(
+        slot_id=None, job_reference_id="12152485009",
+        machine_id="12047953695", quantity=100,
+        instance="nexiuum", origin_instance="nexiuum",
+    )
+    cv_nx = _build_column_values(
+        nx, SETTINGS.schedule_cols("nexiuum"), SETTINGS, "h1"
+    )
+    assert cv_nx[SETTINGS.col_nx_schedule_job_reference] == {"item_ids": [12152485009]}
+
+
 def test_column_values_skips_none_fields():
     """None-valued fields are omitted from the column_values dict."""
     w = SlotWrite(slot_id="X", machine_id="12047953695")
@@ -363,6 +404,51 @@ async def test_apply_plan_partial_success_returns_both_successes_and_errors():
     assert result.updated_slot_ids == []
     assert not result.success
     assert any("alias w1" in e and "BoardRelationValue" in e for e in result.errors)
+
+
+@pytest.mark.asyncio
+async def test_apply_plan_partial_failure_flags_created_slots_as_orphans():
+    """When some creates succeed but the plan also errors, the created slots
+    are flagged as orphans so the failure is not silent (#9). They still appear
+    in created_slot_ids (they DO exist on Monday), but orphaned_slot_ids surfaces
+    them explicitly for operator/cleanup recovery."""
+    from engine.io.apply import apply_plan
+
+    plan = Plan(slot_writes=(
+        SlotWrite(slot_id=None, machine_id="12047953695", name="w0", quantity=100),
+        SlotWrite(slot_id=None, machine_id="12047930644", name="w1", quantity=200),
+    ))
+    fake_data = {"w0": {"id": "9001"}, "w1": None}
+    fake_errors = [{"message": "BoardRelationValue not found", "path": ["w1"]}]
+
+    class _FakeClient:
+        async def query_collecting_errors(self, *a, **kw):
+            return fake_data, fake_errors
+
+    result = await apply_plan(plan, client=_FakeClient())
+    assert not result.success
+    assert result.created_slot_ids == ["9001"]
+    # The single successful create is an orphan: its sibling failed.
+    assert result.orphaned_slot_ids == ["9001"]
+
+
+@pytest.mark.asyncio
+async def test_apply_plan_full_success_has_no_orphans():
+    """A fully successful apply flags no orphans."""
+    from engine.io.apply import apply_plan
+
+    plan = Plan(slot_writes=(
+        SlotWrite(slot_id=None, machine_id="12047953695", name="w0", quantity=100),
+    ))
+    fake_data = {"w0": {"id": "9001"}}
+
+    class _FakeClient:
+        async def query_collecting_errors(self, *a, **kw):
+            return fake_data, []
+
+    result = await apply_plan(plan, client=_FakeClient())
+    assert result.success
+    assert result.orphaned_slot_ids == []
 
 
 @pytest.mark.asyncio
