@@ -318,6 +318,10 @@ def build_schedule_order(
         packaging_breakdown=breakdown,
         n_number=n_number,
         flavor=flavor.flavor,
+        # Phase 2D orders originate on the Nexiuum Production Schedule board.
+        # The apply layer uses this to drop the Job Reference board_relation
+        # link on cross-instance (e.g. Gray Space press) slots (#9).
+        origin_instance="nexiuum",
     )
 
 

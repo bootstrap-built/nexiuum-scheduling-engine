@@ -58,6 +58,21 @@ class ApplyResult:
     def success(self) -> bool:
         return not self.errors
 
+    @property
+    def orphaned_slot_ids(self) -> list[str]:
+        """Slots that WERE created on Monday even though the overall apply
+        failed (#9). A non-atomic mid-plan failure leaves these persisted —
+        surfacing them here (and logging them in apply_plan) keeps the orphans
+        loud and recoverable instead of silent. Empty on full success.
+
+        NOTE: this does not yet DELETE the orphans — full create-rollback is a
+        documented follow-up (see apply_plan). It makes the orphans findable so
+        an operator or a future cleanup pass can remove them.
+        """
+        if not self.errors:
+            return []
+        return list(self.created_slot_ids)
+
 
 # ─────────────────────────────────────────────────────────────────────────
 # Column value serializer
@@ -86,7 +101,18 @@ def _build_column_values(
     if write.machine_id is not None:
         cv[cols.machine] = {"item_ids": [int(write.machine_id)]}
 
-    if write.job_reference_id is not None and write.job_reference_id != "__simulate__":
+    # Job Reference board_relation: only valid when this slot's target Schedule
+    # board is connected to the order's origin board. Each Schedule board's Job
+    # Reference column connects to its OWN instance's source board, so the link
+    # holds only when the write lands on the origin instance. For a cross-instance
+    # slot (e.g. a Nexiuum-origin order's Gray Space press stage) Monday would
+    # reject the link with "items that are not in the connected boards" (#9), so
+    # we skip it — N#/flavor labels carry the human-facing identity instead.
+    if (
+        write.job_reference_id is not None
+        and write.job_reference_id != "__simulate__"
+        and write.instance == write.origin_instance
+    ):
         cv[cols.job_reference] = {"item_ids": [int(write.job_reference_id)]}
 
     if write.stage_id is not None:
@@ -342,6 +368,7 @@ async def apply_plan(
         aggregate = _merge_results(aggregate, result)
 
     if aggregate.errors:
+        orphans = aggregate.orphaned_slot_ids
         log.error(
             "apply_plan partial/full failure across instances: "
             "created=%d updated=%d errors=%d reflow_hash=%s",
@@ -349,6 +376,16 @@ async def apply_plan(
             len(aggregate.updated_slot_ids),
             len(aggregate.errors), rh,
         )
+        # Non-atomic apply (#9): any slots created before the failure persist.
+        # Log their ids explicitly so they are recoverable, not silent orphans.
+        # Full create-rollback is deferred — see the module note / issue #9.
+        if orphans:
+            log.error(
+                "apply_plan left %d orphan slot(s) on Monday after partial "
+                "failure (reflow_hash=%s): %s — these were created but the plan "
+                "did not fully succeed; clean up or re-run is required.",
+                len(orphans), rh, orphans,
+            )
 
     return aggregate
 

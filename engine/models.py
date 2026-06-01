@@ -297,6 +297,14 @@ class ScheduleNewOrder:
     # (flavors[flavor_index].flavor). Pass-through label, never a key into
     # engine logic. None for the legacy Gray Space flow (no flavor source).
     flavor: str | None = None
+    # Origin instance (#9) — which Monday account the originating order item
+    # lives on, i.e. the board `job_reference_id` belongs to. Phase 1 Gray
+    # Space (Blend Records) orders default to "gray_space"; Phase 2D Nexiuum
+    # (Production Schedule) orders set "nexiuum". Threaded onto every SlotWrite
+    # so the apply layer can drop the Job Reference board_relation link on
+    # cross-instance slots (e.g. a Nexiuum-origin order's Gray Space press
+    # stage), which Monday would otherwise reject.
+    origin_instance: MondayInstance = "gray_space"
 
 
 @dataclass(frozen=True)
@@ -423,6 +431,17 @@ class SlotWrite:
     # Pure-core sets this based on the placed machine's instance. IO shell
     # routes each write to the right Schedule board + Monday client.
     instance: MondayInstance = "gray_space"
+    # Phase 2D (#9): which instance the originating order lives on — i.e. the
+    # board the `job_reference_id` item belongs to. Each Schedule board's Job
+    # Reference board_relation is only connected to its OWN instance's source
+    # board (Gray Space Schedule → Blend Records; Nexiuum Schedule → Production
+    # Schedule). So the Job Reference link is valid only when `instance` ==
+    # `origin_instance`. When a Nexiuum-origin order's press stage lands on the
+    # Gray Space board, the link target isn't in the connected board and Monday
+    # rejects the create — the apply layer skips the link in that cross-instance
+    # case (the N#/flavor labels carry identity instead). Defaults to
+    # "gray_space", preserving Phase 1 behavior and existing fixtures.
+    origin_instance: MondayInstance = "gray_space"
     # N# — copied from the Order (new placements) or from the existing Slot
     # (baton-pass / actuals / drift writes that originate from a Slot). None
     # = don't-touch, like every other field. The apply layer writes it to the

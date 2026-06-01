@@ -692,6 +692,7 @@ def _build_slot_writes(
                     status=SlotStatus.QUEUED,
                     manually_placed=False,
                     instance=instance,
+                    origin_instance=order.origin_instance,
                     n_number=order.n_number,
                     flavor=order.flavor,
                 )

@@ -340,6 +340,15 @@ def test_build_schedule_order_propagates_dual_sided():
     assert order.dual_sided is True
 
 
+def test_build_schedule_order_sets_origin_instance_nexiuum():
+    """Phase 2D orders originate on the Nexiuum Production Schedule board, so the
+    order's origin_instance is 'nexiuum'. This is what lets the apply layer skip
+    the Job Reference link on the Gray Space press slot (#9)."""
+    p = parse_spec_sheet_payload(_payload_json())
+    order = build_schedule_order(p, job_reference_id="ps-1")
+    assert order.origin_instance == "nexiuum"
+
+
 def test_build_schedule_order_threads_n_number():
     """The N# the IO shell read off the PS item lands on the order."""
     p = parse_spec_sheet_payload(_payload_json())
