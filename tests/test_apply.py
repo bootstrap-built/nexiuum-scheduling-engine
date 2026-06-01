@@ -382,7 +382,6 @@ def test_apply_plan_raises_on_machine_writes():
 @pytest.mark.asyncio
 async def test_apply_plan_partial_success_returns_both_successes_and_errors():
     """First alias succeeds; second fails — result includes both."""
-    from unittest.mock import AsyncMock, patch
     from engine.io.apply import apply_plan
 
     plan = Plan(slot_writes=(
@@ -399,37 +398,23 @@ async def test_apply_plan_partial_success_returns_both_successes_and_errors():
         async def query_collecting_errors(self, *a, **kw):
             return fake_data, fake_errors
 
+        async def delete_items(self, item_ids):  # #12 rollback collaborator
+            return list(item_ids), []
+
     result = await apply_plan(plan, client=_FakeClient())
+    # created_slot_ids stays the historical "what we created this run" record,
+    # even though #12 then rolls the slot back.
     assert result.created_slot_ids == ["9001"]
     assert result.updated_slot_ids == []
     assert not result.success
     assert any("alias w1" in e and "BoardRelationValue" in e for e in result.errors)
 
 
-@pytest.mark.asyncio
-async def test_apply_plan_partial_failure_flags_created_slots_as_orphans():
-    """When some creates succeed but the plan also errors, the created slots
-    are flagged as orphans so the failure is not silent (#9). They still appear
-    in created_slot_ids (they DO exist on Monday), but orphaned_slot_ids surfaces
-    them explicitly for operator/cleanup recovery."""
-    from engine.io.apply import apply_plan
-
-    plan = Plan(slot_writes=(
-        SlotWrite(slot_id=None, machine_id="12047953695", name="w0", quantity=100),
-        SlotWrite(slot_id=None, machine_id="12047930644", name="w1", quantity=200),
-    ))
-    fake_data = {"w0": {"id": "9001"}, "w1": None}
-    fake_errors = [{"message": "BoardRelationValue not found", "path": ["w1"]}]
-
-    class _FakeClient:
-        async def query_collecting_errors(self, *a, **kw):
-            return fake_data, fake_errors
-
-    result = await apply_plan(plan, client=_FakeClient())
-    assert not result.success
-    assert result.created_slot_ids == ["9001"]
-    # The single successful create is an orphan: its sibling failed.
-    assert result.orphaned_slot_ids == ["9001"]
+# NOTE: #9's `test_apply_plan_partial_failure_flags_created_slots_as_orphans`
+# (created slots persist as orphans on partial failure) was superseded by #12 —
+# those slots are now rolled back. See `test_apply_plan_rolls_back_created_slots_
+# on_partial_failure` (clean rollback) and `test_rollback_failure_keeps_orphan_
+# surfaced` (rollback itself fails) below.
 
 
 @pytest.mark.asyncio
@@ -535,3 +520,183 @@ async def test_apply_plan_transport_error_returned_as_error():
     assert len(result.errors) == 1
     assert "transport error" in result.errors[0]
     assert "connection refused" in result.errors[0]
+
+
+# ─── Rollback on partial failure (#12 — apply_plan atomicity) ─────────────
+#
+# A mid-plan failure must leave NO orphan slots: any slot created in the
+# failing run is rolled back (deleted). Rollback only ever touches slots
+# created in THIS run — never pre-existing/updated slots.
+
+
+@pytest.mark.asyncio
+async def test_apply_plan_rolls_back_created_slots_on_partial_failure():
+    """A mid-plan failure deletes the slots created in that run → no orphans."""
+    from engine.io.apply import apply_plan
+
+    plan = Plan(slot_writes=(
+        SlotWrite(slot_id=None, machine_id="12047953695", name="w0", quantity=100),
+        SlotWrite(slot_id=None, machine_id="12047930644", name="w1", quantity=200),
+    ))
+    fake_data = {"w0": {"id": "9001"}, "w1": None}
+    fake_errors = [{"message": "BoardRelationValue not found", "path": ["w1"]}]
+
+    deleted_calls: list[list[str]] = []
+
+    class _FakeClient:
+        async def query_collecting_errors(self, *a, **kw):
+            return fake_data, fake_errors
+
+        async def delete_items(self, item_ids):
+            deleted_calls.append(list(item_ids))
+            return list(item_ids), []
+
+    result = await apply_plan(plan, client=_FakeClient())
+    assert not result.success                    # failure still surfaced
+    assert result.created_slot_ids == ["9001"]   # historical "what we created"
+    assert result.rolled_back_slot_ids == ["9001"]
+    assert result.orphaned_slot_ids == []        # cleaned up — nothing left behind
+    assert deleted_calls == [["9001"]]           # exactly the created slot, nothing else
+
+
+@pytest.mark.asyncio
+async def test_delete_items_batches_and_routes_per_id_errors():
+    """MondayClient.delete_items builds an aliased delete_item batch and routes
+    per-alias errors back to their slot id, returning (deleted, errors)."""
+    import httpx
+    from unittest.mock import patch
+    from engine.io.monday import MondayClient
+
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, json={
+            "data": {"d0": {"id": "111"}, "d1": None},
+            "errors": [{"message": "item not found", "path": ["d1"]}],
+        })
+
+    real = httpx.AsyncClient
+
+    def patched(*a, **kw):
+        kw["transport"] = httpx.MockTransport(handler)
+        return real(*a, **kw)
+
+    with patch("engine.io.monday.httpx.AsyncClient", side_effect=patched):
+        async with MondayClient(token="t") as c:
+            deleted, errs = await c.delete_items(["111", "222"])
+
+    assert deleted == ["111"]
+    assert len(errs) == 1
+    assert "222" in errs[0] and "item not found" in errs[0]
+    # A real aliased delete_item mutation went out, with the ids as variables.
+    assert "delete_item" in captured["body"]["query"]
+    assert captured["body"]["variables"]["id_0"] == "111"
+    assert captured["body"]["variables"]["id_1"] == "222"
+
+
+@pytest.mark.asyncio
+async def test_delete_items_treats_id_with_warning_as_deleted():
+    """If a delete alias returns an id alongside a warning, the item IS gone —
+    count it as deleted, not as a residual orphan. Mirrors the create path's
+    'an id came back means it exists' signal, so rollback doesn't falsely report
+    an already-removed slot as an orphan."""
+    import httpx
+    from unittest.mock import patch
+    from engine.io.monday import MondayClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={
+            "data": {"d0": {"id": "111"}},
+            "errors": [{"message": "soft warning", "path": ["d0"]}],
+        })
+
+    real = httpx.AsyncClient
+
+    def patched(*a, **kw):
+        kw["transport"] = httpx.MockTransport(handler)
+        return real(*a, **kw)
+
+    with patch("engine.io.monday.httpx.AsyncClient", side_effect=patched):
+        async with MondayClient(token="t") as c:
+            deleted, errs = await c.delete_items(["111"])
+
+    assert deleted == ["111"]
+    assert errs == []
+
+
+@pytest.mark.asyncio
+async def test_delete_items_empty_is_noop():
+    """delete_items([]) makes no network call and returns empty lists."""
+    from engine.io.monday import MondayClient
+
+    async with MondayClient(token="t") as c:  # no transport patched — must not call out
+        deleted, errs = await c.delete_items([])
+    assert deleted == []
+    assert errs == []
+
+
+@pytest.mark.asyncio
+async def test_rollback_never_deletes_updated_or_preexisting_slots():
+    """Rollback only removes slots CREATED in the failing run. An updated
+    (pre-existing) slot must never be passed to delete_items, even when the
+    run fails."""
+    from engine.io.apply import apply_plan
+
+    plan = Plan(slot_writes=(
+        SlotWrite(slot_id=None, machine_id="12047953695", name="w0", quantity=100),  # create OK
+        SlotWrite(slot_id="200", machine_id="12047930644"),                          # update (pre-existing)
+        SlotWrite(slot_id=None, machine_id="12047930644", name="w2", quantity=50),   # create FAILS
+    ))
+    fake_data = {"w0": {"id": "9001"}, "w1": {"id": "200"}, "w2": None}
+    fake_errors = [{"message": "boom", "path": ["w2"]}]
+
+    deleted_calls: list[list[str]] = []
+
+    class _FakeClient:
+        async def query_collecting_errors(self, *a, **kw):
+            return fake_data, fake_errors
+
+        async def delete_items(self, item_ids):
+            deleted_calls.append(list(item_ids))
+            return list(item_ids), []
+
+    result = await apply_plan(plan, client=_FakeClient())
+    assert not result.success
+    assert result.created_slot_ids == ["9001"]
+    assert result.updated_slot_ids == ["200"]
+    assert result.rolled_back_slot_ids == ["9001"]
+    assert result.orphaned_slot_ids == []
+
+    flat_deleted = [i for call in deleted_calls for i in call]
+    assert "200" not in flat_deleted   # the pre-existing/updated slot is never deleted
+    assert flat_deleted == ["9001"]
+
+
+@pytest.mark.asyncio
+async def test_rollback_failure_keeps_orphan_surfaced():
+    """If the rollback delete itself fails, the created slot stays surfaced as
+    an orphan and a rollback error is appended — the failure stays loud rather
+    than reporting a clean rollback that didn't happen."""
+    from engine.io.apply import apply_plan
+
+    plan = Plan(slot_writes=(
+        SlotWrite(slot_id=None, machine_id="12047953695", name="w0", quantity=100),
+        SlotWrite(slot_id=None, machine_id="12047930644", name="w1", quantity=200),
+    ))
+    fake_data = {"w0": {"id": "9001"}, "w1": None}
+    fake_errors = [{"message": "boom", "path": ["w1"]}]
+
+    class _FakeClient:
+        async def query_collecting_errors(self, *a, **kw):
+            return fake_data, fake_errors
+
+        async def delete_items(self, item_ids):
+            return [], [f"item {item_ids[0]}: delete refused"]   # rollback fails
+
+    result = await apply_plan(plan, client=_FakeClient())
+    assert not result.success
+    assert result.created_slot_ids == ["9001"]
+    assert result.rolled_back_slot_ids == []
+    assert result.orphaned_slot_ids == ["9001"]   # rollback couldn't remove it → still an orphan
+    assert any("rollback delete failed" in e for e in result.errors)

@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from engine.config import ScheduleCols, Settings, get_settings
@@ -53,6 +53,7 @@ class ApplyResult:
     updated_slot_ids: list[str] = field(default_factory=list)
     reflow_hash: str = ""
     errors: list[str] = field(default_factory=list)
+    rolled_back_slot_ids: list[str] = field(default_factory=list)
 
     @property
     def success(self) -> bool:
@@ -60,18 +61,20 @@ class ApplyResult:
 
     @property
     def orphaned_slot_ids(self) -> list[str]:
-        """Slots that WERE created on Monday even though the overall apply
-        failed (#9). A non-atomic mid-plan failure leaves these persisted —
-        surfacing them here (and logging them in apply_plan) keeps the orphans
-        loud and recoverable instead of silent. Empty on full success.
+        """Slots created on Monday that are still orphaned after a failed apply.
 
-        NOTE: this does not yet DELETE the orphans — full create-rollback is a
-        documented follow-up (see apply_plan). It makes the orphans findable so
-        an operator or a future cleanup pass can remove them.
+        A non-atomic mid-plan failure can leave just-created slots behind (#9).
+        #12 rolls those back: on any apply error, the slots created in the run
+        are deleted and recorded in `rolled_back_slot_ids`. This property is the
+        residue — created ids that were NOT successfully rolled back (e.g. the
+        delete itself failed). Empty on full success AND after a clean rollback;
+        non-empty only when real orphans remain, keeping them loud and
+        recoverable.
         """
         if not self.errors:
             return []
-        return list(self.created_slot_ids)
+        rolled_back = set(self.rolled_back_slot_ids)
+        return [sid for sid in self.created_slot_ids if sid not in rolled_back]
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -343,6 +346,11 @@ async def apply_plan(
 
     aggregate = ApplyResult(reflow_hash=rh)
 
+    # Per-instance results retained so rollback can delete each instance's
+    # created slots with that instance's own client (created ids alone don't
+    # carry which board/token they belong to).
+    per_instance: list[tuple[MondayInstance, ApplyResult]] = []
+
     # ── Gray Space writes ───────────────────────────────────────────────
     if by_instance["gray_space"]:
         result = await _apply_for_instance(
@@ -353,10 +361,17 @@ async def apply_plan(
             reflow_hash=rh,
             client_override=client,
         )
+        per_instance.append(("gray_space", result))
         aggregate = _merge_results(aggregate, result)
 
     # ── Nexiuum writes (sequential after Gray Space) ────────────────────
-    if by_instance["nexiuum"]:
+    # Short-circuit (#12): if Gray Space already errored, do NOT start Nexiuum.
+    # A plan is one order; Nexiuum packaging stages depend on the Gray Space
+    # press stages that just failed, so any Nexiuum slots would only have to be
+    # rolled back. Not creating them is the cleaner half of atomicity ("never
+    # created") and shrinks the surface where a fallible rollback delete is
+    # needed. Gray Space's own creates are still rolled back below.
+    if by_instance["nexiuum"] and not aggregate.errors:
         result = await _apply_for_instance(
             indexed_writes=by_instance["nexiuum"],
             instance="nexiuum",
@@ -365,10 +380,10 @@ async def apply_plan(
             reflow_hash=rh,
             client_override=None,  # Nexiuum always opens its own client
         )
+        per_instance.append(("nexiuum", result))
         aggregate = _merge_results(aggregate, result)
 
     if aggregate.errors:
-        orphans = aggregate.orphaned_slot_ids
         log.error(
             "apply_plan partial/full failure across instances: "
             "created=%d updated=%d errors=%d reflow_hash=%s",
@@ -376,14 +391,23 @@ async def apply_plan(
             len(aggregate.updated_slot_ids),
             len(aggregate.errors), rh,
         )
-        # Non-atomic apply (#9): any slots created before the failure persist.
-        # Log their ids explicitly so they are recoverable, not silent orphans.
-        # Full create-rollback is deferred — see the module note / issue #9.
+        # #12 atomicity: a non-atomic mid-plan failure leaves the slots already
+        # created on Monday as orphans. Roll them back — delete each instance's
+        # this-run creates with that instance's client — so a failed apply leaves
+        # the boards clean. Only `created_slot_ids` are deleted; updated slots
+        # pre-existed and are never touched.
+        aggregate = await _rollback(
+            aggregate, per_instance, settings=s, client_override=client
+        )
+
+        orphans = aggregate.orphaned_slot_ids
         if orphans:
+            # Rollback could not remove these (e.g. the delete itself failed) —
+            # keep them loud and recoverable rather than silently "clean".
             log.error(
-                "apply_plan left %d orphan slot(s) on Monday after partial "
-                "failure (reflow_hash=%s): %s — these were created but the plan "
-                "did not fully succeed; clean up or re-run is required.",
+                "apply_plan left %d orphan slot(s) on Monday after rollback "
+                "(reflow_hash=%s): %s — created but neither the plan nor the "
+                "rollback fully succeeded; manual cleanup required.",
                 len(orphans), rh, orphans,
             )
 
@@ -487,6 +511,52 @@ async def _apply_for_instance(
         return await _run(c)
 
 
+async def _rollback(
+    aggregate: ApplyResult,
+    per_instance: list[tuple[MondayInstance, ApplyResult]],
+    *,
+    settings: Settings,
+    client_override: MondayClient | None,
+) -> ApplyResult:
+    """Delete every slot created during a failed apply, per instance.
+
+    Rollback is best-effort and idempotent at the run level: it only deletes
+    the ids in each instance's `created_slot_ids` (slots this run created), so
+    pre-existing/updated slots are never touched. Slots that delete cleanly are
+    recorded in `rolled_back_slot_ids`; anything rollback could not remove stays
+    surfaced via `ApplyResult.orphaned_slot_ids` plus an appended error.
+    """
+    rolled_back: list[str] = []
+    rollback_errors: list[str] = []
+
+    for instance, result in per_instance:
+        ids = result.created_slot_ids
+        if not ids:
+            continue
+        try:
+            # Reuse the legacy override for Gray Space; otherwise open a fresh
+            # client of the right flavor — mirrors _apply_for_instance's choice.
+            if client_override is not None and instance == "gray_space":
+                deleted, errs = await client_override.delete_items(ids)
+            else:
+                factory = nexiuum_client if instance == "nexiuum" else gray_space_client
+                async with factory() as c:
+                    deleted, errs = await c.delete_items(ids)
+            rolled_back.extend(deleted)
+            rollback_errors.extend(
+                f"[{instance}] rollback delete failed: {e}" for e in errs
+            )
+        except Exception as e:  # transport / client-open failure — leave orphans loud
+            log.exception("apply_plan rollback transport failure (%s)", instance)
+            rollback_errors.append(f"[{instance}] rollback transport error: {e}")
+
+    return replace(
+        aggregate,
+        errors=aggregate.errors + rollback_errors,
+        rolled_back_slot_ids=aggregate.rolled_back_slot_ids + rolled_back,
+    )
+
+
 def _merge_results(a: ApplyResult, b: ApplyResult) -> ApplyResult:
     """Concatenate two per-instance ApplyResults. reflow_hash assumed equal."""
     return ApplyResult(
@@ -494,4 +564,5 @@ def _merge_results(a: ApplyResult, b: ApplyResult) -> ApplyResult:
         updated_slot_ids=a.updated_slot_ids + b.updated_slot_ids,
         reflow_hash=a.reflow_hash,
         errors=a.errors + b.errors,
+        rolled_back_slot_ids=a.rolled_back_slot_ids + b.rolled_back_slot_ids,
     )
