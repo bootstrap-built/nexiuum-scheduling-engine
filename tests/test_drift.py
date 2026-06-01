@@ -424,3 +424,19 @@ def test_plan_for_drift_late_end_after_stale_late_start_still_works():
     )
     assert len(real_plan.slot_writes) == 1
     assert real_plan.slot_writes[0].drift_last_detected_at == NOW
+
+
+def test_plan_for_drift_write_preserves_n_number():
+    """The drift stamp originates from an existing Slot — it copies that
+    Slot's N# so the value survives the write/re-read cycle."""
+    from dataclasses import replace
+
+    slot = replace(_slot(planned_start=NOW - timedelta(minutes=30)), n_number="N3629")
+    snap = _snapshot((slot,))
+    event = DriftDetected(slot_id="S1", kind="late_start")
+    plan = plan_for_drift(
+        snap, event, now=NOW,
+        threshold_minutes=THRESHOLD, suppression_minutes=SUPPRESSION,
+    )
+    assert len(plan.slot_writes) == 1
+    assert plan.slot_writes[0].n_number == "N3629"

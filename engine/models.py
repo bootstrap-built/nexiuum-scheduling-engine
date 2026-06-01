@@ -175,6 +175,11 @@ class Slot:
     last_reflow_hash: str | None
     drift_last_detected_at: datetime | None
     instance: MondayInstance = "gray_space"
+    # N# — the originating PO's traceability number, read from the Schedule
+    # board's N# text column on snapshot. Pass-through label, never a key
+    # into engine logic. None for the legacy Gray Space Blend Records flow,
+    # which doesn't carry an N# yet (tracked in .scratch/pending-issues.md).
+    n_number: str | None = None
 
     @property
     def is_immovable(self) -> bool:
@@ -280,6 +285,10 @@ class ScheduleNewOrder:
     # share a machine_class (rare — two clamshell configs) or differ
     # (common — clamshell + sachet split).
     packaging_breakdown: tuple[PackagingSlice, ...] = ()
+    # N# — the originating PO's traceability number, read from the Production
+    # Schedule item's "Nexiuum #" board_relation on Phase 2D ingest. None for
+    # the legacy Gray Space Blend Records flow. Pass-through label only.
+    n_number: str | None = None
 
 
 @dataclass(frozen=True)
@@ -406,6 +415,11 @@ class SlotWrite:
     # Pure-core sets this based on the placed machine's instance. IO shell
     # routes each write to the right Schedule board + Monday client.
     instance: MondayInstance = "gray_space"
+    # N# — copied from the Order (new placements) or from the existing Slot
+    # (baton-pass / actuals / drift writes that originate from a Slot). None
+    # = don't-touch, like every other field. The apply layer writes it to the
+    # Schedule board's N# text column.
+    n_number: str | None = None
 
 
 @dataclass(frozen=True)

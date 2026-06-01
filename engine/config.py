@@ -64,6 +64,10 @@ class ScheduleCols:
     priority: str
     last_reflow_hash: str
     drift_last_detected_at: str
+    # N# traceability text column (added to both Schedule boards in #3).
+    # The engine stamps the originating PO's N# here on every SlotWrite that
+    # carries one, so operators can filter/sort the Schedule board by N#.
+    n_number: str
 
 
 class Settings(BaseSettings):
@@ -124,6 +128,13 @@ class Settings(BaseSettings):
     # Spec Sheet Payload long-text column on Production Schedule. Holds
     # the form's canonical structured submission JSON per item.
     col_ps_spec_sheet_payload: str = "long_text_mm3bbhcv"
+    # Phase 2D — the "Nexiuum #" board_relation column on Production Schedule
+    # that links each per-flavor item to its PO on the Quotes/Deals/POs board.
+    # The engine reads its `display_value` (the linked PO's name, e.g.
+    # "N3629") as the order's N#. It is a board_relation, not a plain mirror
+    # text column — the reader pulls `display_value`, not `text`. READ-ONLY:
+    # the engine never writes the Production Schedule board.
+    col_ps_n_number: str = "board_relation_mktgp1ja"
 
     # ── Schedule board column IDs (Gray Space — Phase 1) ─────────────────
     # Captured from the board after creation. Hardcoded because Monday's API
@@ -148,6 +159,7 @@ class Settings(BaseSettings):
     col_schedule_priority: str = "color_mm3h2cm7"
     col_schedule_last_reflow_hash: str = "text_mm3hf0h5"
     col_schedule_drift_last_detected_at: str = "date_mm3h9jxp"
+    col_schedule_n_number: str = "text_mm3wcm9e"  # "N#" text column (#3)
 
     # ── Capacity Engine column IDs ───────────────────────────────────────
     col_cap_status: str = "color_mm3gcye0"
@@ -209,6 +221,7 @@ class Settings(BaseSettings):
     col_nx_schedule_priority: str = "color_mm3patr6"
     col_nx_schedule_last_reflow_hash: str = "text_mm3prf9j"
     col_nx_schedule_drift_last_detected_at: str = "date_mm3pdj0y"
+    col_nx_schedule_n_number: str = "text_mm3w4ghr"  # "N#" text column (#3)
 
     # ── Blend Records column IDs (source board for press actuals) ────────
     col_blend_status: str = "color_mm1mb9cm"  # "Blend Status" — flips to "Pressing" → actual_start
@@ -434,6 +447,7 @@ class Settings(BaseSettings):
                 priority=self.col_nx_schedule_priority,
                 last_reflow_hash=self.col_nx_schedule_last_reflow_hash,
                 drift_last_detected_at=self.col_nx_schedule_drift_last_detected_at,
+                n_number=self.col_nx_schedule_n_number,
             )
         return ScheduleCols(
             machine=self.col_schedule_machine,
@@ -454,6 +468,7 @@ class Settings(BaseSettings):
             priority=self.col_schedule_priority,
             last_reflow_hash=self.col_schedule_last_reflow_hash,
             drift_last_detected_at=self.col_schedule_drift_last_detected_at,
+            n_number=self.col_schedule_n_number,
         )
 
     def schedule_board(self, instance: Literal["gray_space", "nexiuum"]) -> int:

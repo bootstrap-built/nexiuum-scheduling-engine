@@ -165,6 +165,9 @@ def plan_for_drift(
                 slot_id=slot.id,
                 drift_last_detected_at=now,
                 instance=slot.instance,
+                # Originates from an existing Slot — copy its N# so it
+                # round-trips through the write/re-read cycle.
+                n_number=slot.n_number,
             ),
         ),
         notes=(f"drift {event.kind} on slot {slot.id}: stamped drift_last_detected_at",),

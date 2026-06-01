@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Literal
 
+from engine.core.labels import compose_slot_name
 from engine.core.placement import find_earliest_start
 from engine.core.routing import eligible_machines
 from engine.models import (
@@ -643,11 +644,11 @@ def _build_slot_writes(
 ) -> list[SlotWrite]:
     """Flatten per-stage chunk placements into individual SlotWrites.
 
-    Naming convention:
-    - Single chunk, no config notes: `{job_ref} → {stage_id}` (Phase 1
-      placeholder; IO shell rewrites to real machine name).
-    - Split stage: `{job_ref} → {stage_id} (1/2)` — chunk index out of
-      chunk_total.
+    Naming convention (identity prefix owned by `engine.core.labels`):
+    - With an N#: `N12345 → {stage_id}` — operators see the PO at a glance.
+    - Without one (legacy / unlinked): `#<last-6-of-job-ref> → {stage_id}`,
+      matching the engine's prior Marey fallback.
+    - Split stage: appends ` (1/2)` — chunk index out of chunk_total.
     - Packaging slice with config notes: appends `· 3ct diamond` so the
       Marey chart and operator-facing slot list explain why two clamshell
       slots have different qtys.
@@ -664,7 +665,17 @@ def _build_slot_writes(
             if chunk.spec.config_notes:
                 suffix_parts.append(chunk.spec.config_notes)
             suffix = f" ({' · '.join(suffix_parts)})" if suffix_parts else ""
-            name = f"{order.job_reference_id} → {stage_id}{suffix}"
+            # The Slot has no Monday id at placement time, so the labels
+            # module's `#<last-6>` fallback uses the job_reference_id (the
+            # stable seed id) — same identifier the Marey view falls back to.
+            # When n_number is present it wins and job_reference_id is unused.
+            base_name = compose_slot_name(
+                n_number=order.n_number,
+                flavor=None,  # Flavor plumbing lands in a later slice
+                stage_id=stage_id,
+                slot_id=order.job_reference_id,
+            )
+            name = f"{base_name}{suffix}"
 
             writes.append(
                 SlotWrite(
@@ -681,6 +692,7 @@ def _build_slot_writes(
                     status=SlotStatus.QUEUED,
                     manually_placed=False,
                     instance=instance,
+                    n_number=order.n_number,
                 )
             )
 
