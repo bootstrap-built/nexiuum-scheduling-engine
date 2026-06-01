@@ -408,11 +408,25 @@ function render() {
     }
   }
 
-  // Time domain
+  // Time domain.
+  // zoomHours sets the horizontal *density* — one zoom-window of time fills the
+  // viewport's plot width. The domain then extends rightward to cover the
+  // furthest scheduled slot, so the operator can pan (scroll left↔right) to
+  // reach slots beyond the initial window instead of the whole timeline being
+  // squeezed to fit on screen. See #11.
   const now = new Date(snap.read_at || Date.now());
-  const span = state.zoomHours * 3600 * 1000;
-  const t0 = now.getTime() - span * 0.15;  // a little history on the left
-  const t1 = t0 + span;
+  const windowSpan = state.zoomHours * 3600 * 1000;
+  const t0 = now.getTime() - windowSpan * 0.15;  // a little history on the left
+
+  // Extend the domain end to the latest slot end if it runs past the default
+  // window, with a little future padding so the last bar isn't flush to the edge.
+  let dataEnd = t0 + windowSpan;
+  let extendsBeyondWindow = false;
+  for (const s of snap.slots) {
+    const e = s.actual_end ? parseISO(s.actual_end) : parseISO(s.planned_end);
+    if (e && e.getTime() > dataEnd) { dataEnd = e.getTime(); extendsBeyondWindow = true; }
+  }
+  const t1 = extendsBeyondWindow ? dataEnd + windowSpan * 0.1 : t0 + windowSpan;
 
   // Geometry — keep in sync with the labels-gutter CSS:
   //   .labels  padding-top: 28px            (= topAxisH — reserved for the time-axis strip)
@@ -426,11 +440,18 @@ function render() {
   const groupCount = rowsByGroup.length;
   const innerH = topAxisH + totalRows * laneH + groupCount * hdrH;
   const scroll = document.getElementById('scroll');
-  const innerW = Math.max(scroll.clientWidth, 1200);
   const padL = 16, padR = 16;
-  const plotW = innerW - padL - padR;
 
-  const x = t => padL + ((t - t0) / (t1 - t0)) * plotW;
+  // Fixed horizontal density: one zoom-window spans exactly the viewport's plot
+  // area (floored at 1200px as before). A longer domain → a wider-than-viewport
+  // SVG → the .scroll container's overflow-x:auto provides the horizontal pan.
+  // The labels gutter is a separate fixed element, so lane labels stay pinned.
+  const viewportPlotW = Math.max(scroll.clientWidth, 1200) - padL - padR;
+  const pxPerMs = viewportPlotW / windowSpan;
+  const plotW = (t1 - t0) * pxPerMs;
+  const innerW = plotW + padL + padR;
+
+  const x = t => padL + (t - t0) * pxPerMs;
 
   // Lane y center, accounting for the top-axis strip + group headers.
   // Mirrors the labels gutter exactly: padding-top → group header → rows.
