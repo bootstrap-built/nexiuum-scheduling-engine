@@ -11,7 +11,6 @@ later schedule-migration phase doesn't accidentally regress.
 from __future__ import annotations
 
 import json
-import os
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -19,7 +18,7 @@ import pytest
 
 from engine.config import Settings, get_settings, reset_settings_for_tests
 from engine.io.monday import MondayClient
-from engine.io.snapshot import _parse_machine, _parse_recipe, _parse_slot, read_snapshot
+from engine.io.snapshot import _parse_machine, _parse_slot, read_snapshot
 from engine.models import MachineStatus, Snapshot
 
 
@@ -496,6 +495,118 @@ async def test_apply_plan_splits_mixed_plan_gs_first(
     assert "press-slot-1" in result.created_slot_ids
     assert "pack-slot-1" in result.created_slot_ids
     assert not result.errors
+
+
+async def test_apply_plan_rolls_back_gray_space_creates_when_nexiuum_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#12 cross-instance atomicity (the N3851 scenario): Gray Space creates
+    succeed, then the Nexiuum batch fails. The Gray Space slots must be rolled
+    back via the Gray Space client so no orphan is left on either board."""
+    from engine.io.apply import apply_plan
+    from engine.models import Plan, SlotStatus, SlotWrite
+
+    monkeypatch.setenv("MONDAY_GRAYSPACE_TOKEN", "gs-tok")
+    monkeypatch.setenv("MONDAY_NEXIUUM_TOKEN", "nx-tok")
+    monkeypatch.setenv("NEXIUUM_CAPACITY_ENGINE_BOARD", "111")
+    monkeypatch.setenv("NEXIUUM_PROCESS_RECIPE_BOARD", "222")
+    monkeypatch.setenv("NEXIUUM_SCHEDULE_BOARD", "12345")
+    reset_settings_for_tests()
+
+    gs_client = AsyncMock(spec=MondayClient)
+    gs_client.__aenter__ = AsyncMock(return_value=gs_client)
+    gs_client.__aexit__ = AsyncMock(return_value=None)
+    gs_client.query_collecting_errors = AsyncMock(
+        return_value=({"w0": {"id": "press-slot-1"}}, [])
+    )
+    gs_client.delete_items = AsyncMock(return_value=(["press-slot-1"], []))
+
+    nx_client = AsyncMock(spec=MondayClient)
+    nx_client.__aenter__ = AsyncMock(return_value=nx_client)
+    nx_client.__aexit__ = AsyncMock(return_value=None)
+    nx_client.query_collecting_errors = AsyncMock(
+        return_value=({"w1": None}, [{"message": "boom", "path": ["w1"]}])
+    )
+    nx_client.delete_items = AsyncMock(return_value=([], []))
+
+    plan = Plan(slot_writes=(
+        SlotWrite(slot_id=None, name="GS", machine_id="1", quantity=100,
+                  status=SlotStatus.QUEUED, instance="gray_space"),
+        SlotWrite(slot_id=None, name="NX", machine_id="2", quantity=100,
+                  status=SlotStatus.QUEUED, instance="nexiuum"),
+    ))
+
+    with (
+        patch("engine.io.apply.gray_space_client", return_value=gs_client),
+        patch("engine.io.apply.nexiuum_client", return_value=nx_client),
+    ):
+        result = await apply_plan(plan)
+
+    assert not result.success                               # Nexiuum failure surfaced
+    assert result.created_slot_ids == ["press-slot-1"]      # GS slot was created
+    assert result.rolled_back_slot_ids == ["press-slot-1"]  # …then rolled back
+    assert result.orphaned_slot_ids == []                   # nothing left on either board
+    gs_client.delete_items.assert_awaited_once_with(["press-slot-1"])
+    nx_client.delete_items.assert_not_awaited()             # Nexiuum created nothing
+
+
+async def test_apply_plan_skips_nexiuum_when_gray_space_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#12: if the Gray Space batch errors, the Nexiuum batch must NOT run —
+    its slots would only have to be rolled back, and packaging stages depend on
+    the press stages that just failed. Gray Space's own creates are rolled back;
+    Nexiuum never touches the board (nothing to orphan)."""
+    from engine.io.apply import apply_plan
+    from engine.models import Plan, SlotStatus, SlotWrite
+
+    monkeypatch.setenv("MONDAY_GRAYSPACE_TOKEN", "gs-tok")
+    monkeypatch.setenv("MONDAY_NEXIUUM_TOKEN", "nx-tok")
+    monkeypatch.setenv("NEXIUUM_CAPACITY_ENGINE_BOARD", "111")
+    monkeypatch.setenv("NEXIUUM_PROCESS_RECIPE_BOARD", "222")
+    monkeypatch.setenv("NEXIUUM_SCHEDULE_BOARD", "12345")
+    reset_settings_for_tests()
+
+    gs_client = AsyncMock(spec=MondayClient)
+    gs_client.__aenter__ = AsyncMock(return_value=gs_client)
+    gs_client.__aexit__ = AsyncMock(return_value=None)
+    # w0 create succeeds, w1 create fails → partial Gray Space failure.
+    gs_client.query_collecting_errors = AsyncMock(
+        return_value=({"w0": {"id": "gs-1"}, "w1": None},
+                      [{"message": "boom", "path": ["w1"]}])
+    )
+    gs_client.delete_items = AsyncMock(return_value=(["gs-1"], []))
+
+    nx_client = AsyncMock(spec=MondayClient)
+    nx_client.__aenter__ = AsyncMock(return_value=nx_client)
+    nx_client.__aexit__ = AsyncMock(return_value=None)
+    nx_client.query_collecting_errors = AsyncMock(
+        return_value=({"w2": {"id": "nx-1"}}, [])
+    )
+    nx_client.delete_items = AsyncMock(return_value=([], []))
+
+    plan = Plan(slot_writes=(
+        SlotWrite(slot_id=None, name="GS0", machine_id="1", quantity=100,
+                  status=SlotStatus.QUEUED, instance="gray_space"),
+        SlotWrite(slot_id=None, name="GS1", machine_id="2", quantity=100,
+                  status=SlotStatus.QUEUED, instance="gray_space"),
+        SlotWrite(slot_id=None, name="NX", machine_id="3", quantity=100,
+                  status=SlotStatus.QUEUED, instance="nexiuum"),
+    ))
+
+    with (
+        patch("engine.io.apply.gray_space_client", return_value=gs_client),
+        patch("engine.io.apply.nexiuum_client", return_value=nx_client),
+    ):
+        result = await apply_plan(plan)
+
+    assert not result.success
+    nx_client.query_collecting_errors.assert_not_awaited()  # Nexiuum never ran
+    assert result.created_slot_ids == ["gs-1"]              # only the GS create
+    assert result.rolled_back_slot_ids == ["gs-1"]          # …rolled back
+    assert result.orphaned_slot_ids == []                   # clean
+    gs_client.delete_items.assert_awaited_once_with(["gs-1"])
+    nx_client.delete_items.assert_not_awaited()
 
 
 async def test_apply_plan_errors_when_nexiuum_writes_but_not_enabled(

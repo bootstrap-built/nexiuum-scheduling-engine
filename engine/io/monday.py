@@ -144,6 +144,67 @@ class MondayClient:
         errors = payload.get("errors") or []
         return data, errors
 
+    # ── High-level mutations ────────────────────────────────────────────
+
+    async def delete_items(
+        self, item_ids: list[str],
+    ) -> tuple[list[str], list[str]]:
+        """Batch-delete items by id. Best-effort, never raises on Monday errors.
+
+        Returns `(deleted_ids, error_messages)`. Used by apply_plan's rollback
+        (#12) to remove slots created during a failed apply. Like the batched
+        write path, Monday executes aliased deletes sequentially and may
+        partially fail: each alias either returns its id (deleted) or produces a
+        per-alias error routed back to its slot id. Transport errors still raise.
+        """
+        if not item_ids:
+            return [], []
+
+        pieces: list[str] = []
+        variables: dict[str, Any] = {}
+        var_decls: list[str] = []
+        alias_to_id: dict[str, str] = {}
+        for i, item_id in enumerate(item_ids):
+            alias = f"d{i}"
+            var = f"id_{i}"
+            alias_to_id[alias] = str(item_id)
+            variables[var] = str(item_id)
+            var_decls.append(f"${var}: ID!")
+            pieces.append(f"{alias}: delete_item(item_id: ${var}) {{ id }}")
+
+        mutation = (
+            f"mutation({', '.join(var_decls)}) {{\n  " + "\n  ".join(pieces) + "\n}"
+        )
+        data, gql_errors = await self.query_collecting_errors(mutation, variables=variables)
+
+        errors_by_alias: dict[str, list[str]] = {}
+        unrouted: list[str] = []
+        for err in gql_errors:
+            msg = err.get("message", "Monday returned an unspecified error")
+            path = err.get("path") or []
+            if path and isinstance(path[0], str):
+                errors_by_alias.setdefault(path[0], []).append(msg)
+            else:
+                unrouted.append(msg)
+
+        deleted: list[str] = []
+        error_messages: list[str] = []
+        for alias, item_id in alias_to_id.items():
+            payload = data.get(alias)
+            alias_errors = errors_by_alias.get(alias) or []
+            # An id coming back means the item is gone — treat it as deleted even
+            # if Monday co-returns a warning (mirrors the create path's "id ==
+            # exists" signal). Only a missing id is a real rollback failure.
+            if payload and "id" in payload:
+                deleted.append(item_id)
+            else:
+                detail = "; ".join(alias_errors) if alias_errors else (
+                    "no id returned and no per-alias error from Monday"
+                )
+                error_messages.append(f"item {item_id}: {detail}")
+        error_messages.extend(unrouted)
+        return deleted, error_messages
+
     # ── High-level board reads ──────────────────────────────────────────
 
     async def fetch_board_items(
