@@ -671,7 +671,7 @@ def _build_slot_writes(
             # When n_number is present it wins and job_reference_id is unused.
             base_name = compose_slot_name(
                 n_number=order.n_number,
-                flavor=None,  # Flavor plumbing lands in a later slice
+                flavor=order.flavor,
                 stage_id=stage_id,
                 slot_id=order.job_reference_id,
             )
@@ -693,6 +693,7 @@ def _build_slot_writes(
                     manually_placed=False,
                     instance=instance,
                     n_number=order.n_number,
+                    flavor=order.flavor,
                 )
             )
 

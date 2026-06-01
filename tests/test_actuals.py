@@ -639,3 +639,54 @@ def test_baton_pass_write_preserves_dependent_slot_n_number():
     by_slot = {w.slot_id: w for w in plan.slot_writes}
     assert by_slot["blister-1"].planned_start is not None  # was pushed
     assert by_slot["blister-1"].n_number == "N3629"
+
+
+# ─── Flavor propagation: writes from an existing Slot copy its flavor (#5) ──
+# Same round-trip guarantee as N#: flavor survives Snapshot → SlotWrite →
+# board → next Snapshot on actuals + baton-pass writes.
+
+
+def test_actual_start_write_preserves_flavor():
+    slot = replace(_slot(status=SlotStatus.QUEUED), flavor="Strawberry Banana")
+    snap = _snapshot((slot,))
+    event = ActualStartReported(job_reference_id="J1", stage_id="press", actual_at=ACTUAL_AT)
+    plan = plan_for_actual_start(snap, event)
+    assert plan.slot_writes
+    assert all(w.flavor == "Strawberry Banana" for w in plan.slot_writes)
+
+
+def test_actual_end_write_preserves_flavor():
+    slot = replace(
+        _slot(status=SlotStatus.RUNNING, actual_start=NOW), flavor="Strawberry Banana",
+    )
+    snap = _snapshot((slot,))
+    event = ActualEndReported(job_reference_id="J1", stage_id="press", actual_at=ACTUAL_AT)
+    plan = plan_for_actual_end(snap, event, handoff_buffer_minutes=30)
+    finishing = [w for w in plan.slot_writes if w.slot_id == "S1"]
+    assert finishing and finishing[0].flavor == "Strawberry Banana"
+
+
+def test_baton_pass_write_preserves_dependent_slot_flavor():
+    """A baton-pass write copies the dependent Slot's flavor (like its N#)."""
+    actual_at = NOW.replace(hour=11)
+    press = replace(
+        _multistage_slot(
+            id_="press-1", stage_id="press",
+            status=SlotStatus.RUNNING, actual_start=NOW,
+            planned_start=NOW, planned_end=NOW.replace(hour=11),
+        ),
+        flavor="Cherry Lime",
+    )
+    blister = replace(
+        _multistage_slot(
+            id_="blister-1", stage_id="blister",
+            planned_start=NOW.replace(hour=11), planned_end=NOW.replace(hour=14),
+        ),
+        flavor="Cherry Lime",
+    )
+    snap = _multistage_snapshot((press, blister))
+    event = ActualEndReported(job_reference_id="J1", stage_id="press", actual_at=actual_at)
+    plan = plan_for_actual_end(snap, event, handoff_buffer_minutes=30)
+    by_slot = {w.slot_id: w for w in plan.slot_writes}
+    assert by_slot["blister-1"].planned_start is not None  # was pushed
+    assert by_slot["blister-1"].flavor == "Cherry Lime"

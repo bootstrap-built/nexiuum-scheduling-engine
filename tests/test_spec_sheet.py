@@ -353,3 +353,41 @@ def test_build_schedule_order_n_number_defaults_to_none():
     p = parse_spec_sheet_payload(_payload_json())
     order = build_schedule_order(p, job_reference_id="ps-1")
     assert order.n_number is None
+
+
+# ─── Flavor extraction (#5) ─────────────────────────────────────────────────
+# Flavor is the customer-facing differentiator between Orders sharing an N#.
+# The pure core reads it off the indexed flavor row and carries it on the
+# Order as a pass-through label (like N#).
+
+
+@pytest.mark.parametrize("flavor_name", ["Strawberry", "Strawberry Banana", "Cherry Lime"])
+def test_build_schedule_order_extracts_flavor(flavor_name):
+    """build_schedule_order pulls flavors[flavor_index].flavor onto the order."""
+    p = parse_spec_sheet_payload(_payload_json(
+        flavors=[{"flavor": flavor_name, "qty": 1000, "packaging_breakdown": []}],
+        flavor_index=0,
+    ))
+    order = build_schedule_order(p, job_reference_id="ps-1")
+    assert order.flavor == flavor_name
+
+
+def test_build_schedule_order_extracts_flavor_at_index():
+    """The flavor for THIS PS item is the one at flavor_index, not flavors[0]."""
+    p = parse_spec_sheet_payload(_payload_json(
+        flavor_index=1,
+        flavors=[
+            {"flavor": "Strawberry", "qty": 100, "packaging_breakdown": []},
+            {"flavor": "Blueberry", "qty": 200, "packaging_breakdown": []},
+        ],
+    ))
+    order = build_schedule_order(p, job_reference_id="ps-1")
+    assert order.flavor == "Blueberry"
+
+
+def test_build_schedule_order_out_of_range_flavor_index_still_raises():
+    """An out-of-range flavor_index raises the existing parse error before
+    any flavor extraction — flavor plumbing must not mask that guard."""
+    p = parse_spec_sheet_payload(_payload_json(flavor_index=5))  # only 1 flavor
+    with pytest.raises(SpecSheetParseError, match="flavor_index"):
+        build_schedule_order(p, job_reference_id="ps-1")

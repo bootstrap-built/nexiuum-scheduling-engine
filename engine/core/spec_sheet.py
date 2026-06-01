@@ -317,6 +317,7 @@ def build_schedule_order(
         active_mg=primary_active_mg(payload),
         packaging_breakdown=breakdown,
         n_number=n_number,
+        flavor=flavor.flavor,
     )
 
 

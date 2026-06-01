@@ -180,6 +180,11 @@ class Slot:
     # into engine logic. None for the legacy Gray Space Blend Records flow,
     # which doesn't carry an N# yet (tracked in .scratch/pending-issues.md).
     n_number: str | None = None
+    # Flavor — the customer-facing differentiator between Orders sharing an N#,
+    # read from the Schedule board's Flavor text column on snapshot. Pass-through
+    # label, never a key. None for the legacy Gray Space Blend Records flow,
+    # which has no source for it (tracked in .scratch/pending-issues.md).
+    flavor: str | None = None
 
     @property
     def is_immovable(self) -> bool:
@@ -289,6 +294,11 @@ class ScheduleNewOrder:
     # Schedule item's "Nexiuum #" board_relation on Phase 2D ingest. None for
     # the legacy Gray Space Blend Records flow. Pass-through label only.
     n_number: str | None = None
+    # Flavor — the customer-facing differentiator between Orders sharing an N#,
+    # read from the indexed flavor row of the Spec Sheet Payload. None for the
+    # legacy Gray Space Blend Records flow (no source for it there). Pass-through
+    # label only, never a key — used alongside N# on slot names + lane labels.
+    flavor: str | None = None
 
 
 @dataclass(frozen=True)
@@ -420,6 +430,10 @@ class SlotWrite:
     # = don't-touch, like every other field. The apply layer writes it to the
     # Schedule board's N# text column.
     n_number: str | None = None
+    # Flavor — copied from the Order (new placements) or the existing Slot
+    # (baton-pass / actuals / drift). None = don't-touch. The apply layer
+    # writes it to the Schedule board's Flavor text column.
+    flavor: str | None = None
 
 
 @dataclass(frozen=True)

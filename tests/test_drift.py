@@ -440,3 +440,19 @@ def test_plan_for_drift_write_preserves_n_number():
     )
     assert len(plan.slot_writes) == 1
     assert plan.slot_writes[0].n_number == "N3629"
+
+
+def test_plan_for_drift_write_preserves_flavor():
+    """The drift stamp originates from an existing Slot — it copies that
+    Slot's flavor so the value survives the write/re-read cycle (like N#)."""
+    from dataclasses import replace
+
+    slot = replace(_slot(planned_start=NOW - timedelta(minutes=30)), flavor="Strawberry Banana")
+    snap = _snapshot((slot,))
+    event = DriftDetected(slot_id="S1", kind="late_start")
+    plan = plan_for_drift(
+        snap, event, now=NOW,
+        threshold_minutes=THRESHOLD, suppression_minutes=SUPPRESSION,
+    )
+    assert len(plan.slot_writes) == 1
+    assert plan.slot_writes[0].flavor == "Strawberry Banana"

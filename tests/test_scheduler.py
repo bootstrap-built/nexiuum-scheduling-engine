@@ -333,3 +333,37 @@ def test_dag_respects_predecessor_end_times():
     assert by_stage["lotcode"].planned_start >= press_end
     # clamshell starts at or after the LATER of blister/lotcode (the merge)
     assert clamshell_start >= max(blister_end, lotcode_end)
+
+
+# ─── Flavor propagation + naming (#5) ────────────────────────────────────
+# Flavor rides from the Order onto every emitted SlotWrite and into the
+# composed slot name, mirroring N#. The labels module owns the format.
+
+
+def test_new_order_stamps_flavor_on_every_slot_write():
+    """Every SlotWrite the scheduler emits carries the Order's flavor."""
+    snap = _snap([_machine("Gandalf")], [_recipe_press_only()])
+    order = _order(n_number="N12345", flavor="Strawberry Banana")
+    plan = plan_for_new_order(snap, order, now=NOW)
+    assert plan.slot_writes
+    assert all(w.flavor == "Strawberry Banana" for w in plan.slot_writes)
+
+
+def test_new_order_slot_name_includes_n_number_and_flavor():
+    """Phase 2D slot name renders 'N12345 · Strawberry Banana → press'."""
+    snap = _snap([_machine("Gandalf")], [_recipe_press_only()])
+    order = _order(n_number="N12345", flavor="Strawberry Banana")
+    plan = plan_for_new_order(snap, order, now=NOW)
+    press = next(w for w in plan.slot_writes if w.stage_id == "press")
+    assert press.name == "N12345 · Strawberry Banana → press"
+
+
+def test_new_order_flavor_defaults_to_none_legacy():
+    """No flavor supplied (legacy GS) → SlotWrites carry flavor=None and the
+    name falls back to the N#-only / #<last-6> identity (unchanged from #4)."""
+    snap = _snap([_machine("Gandalf")], [_recipe_press_only()])
+    order = _order(n_number="N12345")  # no flavor
+    plan = plan_for_new_order(snap, order, now=NOW)
+    press = next(w for w in plan.slot_writes if w.stage_id == "press")
+    assert press.flavor is None
+    assert press.name == "N12345 → press"
