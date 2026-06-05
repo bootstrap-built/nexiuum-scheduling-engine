@@ -21,7 +21,7 @@ The Nexiuum-side traceability number for a PO. Issued by Nexiuum upstream and ca
 The customer-facing differentiator between Orders sharing the same N#. One PS item = one Flavor (e.g., "Strawberry", "Strawberry Banana", "Cherry Lime"). The engine reads the Flavor as a label off the PS item, carries it on Order, and uses it alongside N# on Slot names and Marey lane labels so operators can tell which of the (potentially many) Orders under a single N# they're looking at. Like N#, it's a label not a key.
 
 **Blend Record**:
-A downstream artifact on the Gray Space Blend Records board, created 1:1 for Orders whose Process includes a blending or pressing stage. In Phase 1 this board was the engine's input trigger; in Phase 2D+ it is just a downstream side-effect of a `Pressing` stage. Not a scheduling input in the new flow.
+A row on the Gray Space Blend Records board representing the blending/pressing work for one Order. Created by an upstream Monday workflow when a Production Schedule item that requires blending/pressing is created — carrying the spec-sheet data — and landing in `Received`. Its **Blend Status** is the engine's press-scheduling trigger: when Gray Space flips it `Received → Blending`, the engine releases that Order's press + downstream stages onto the schedule (see Reactive scope). Later transitions drive actuals: `Pressing → actual_start`, `Done → actual_end`. The engine reads this board (status webhooks) but never creates or writes it.
 _Avoid_: Batch, Press Record
 
 ### Monday boards
