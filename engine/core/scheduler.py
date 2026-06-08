@@ -256,11 +256,21 @@ def _build_stage_specs(
     """
     recipe_stages_topo = _topological_order(recipe)
 
+    # ADR-0004 — Kitting-Only orders (include_press=False) are already-pressed
+    # inventory: drop the Pressing-class recipe stages and schedule only the
+    # packaging breakdown. Any surviving recipe stage that depended on a dropped
+    # press stage has that dependency stripped (Phase 1 recipes are press-only,
+    # so this normally leaves no recipe stages at all).
+    dropped_ids: set[str] = set()
+    if not order.include_press:
+        dropped_ids = {s.id for s in recipe_stages_topo if s.machine_class == "Pressing"}
+        recipe_stages_topo = [s for s in recipe_stages_topo if s.id not in dropped_ids]
+
     specs: list[_StageSpec] = [
         _StageSpec(
             stage_id=s.id,
             machine_class=s.machine_class,
-            depends_on=s.depends_on,
+            depends_on=tuple(d for d in s.depends_on if d not in dropped_ids),
             quantity=order.quantity,
             items_per_container=1,
             config_notes="",
@@ -272,11 +282,15 @@ def _build_stage_specs(
     if not order.packaging_breakdown:
         return specs
 
-    # Recipe terminal stages = stages no other recipe stage depends on.
+    # Recipe terminal stages = stages no other (surviving) recipe stage depends
+    # on. Computed over the post-drop set so packaging hangs off what remains
+    # (or off nothing, when include_press dropped every recipe stage).
+    surviving_ids = {s.id for s in recipe_stages_topo}
     has_dependents: set[str] = set()
-    for stage in recipe.stages:
+    for stage in recipe_stages_topo:
         for dep in stage.depends_on:
-            has_dependents.add(dep)
+            if dep in surviving_ids:
+                has_dependents.add(dep)
     terminal_stage_ids = tuple(
         s.id for s in recipe_stages_topo if s.id not in has_dependents
     )

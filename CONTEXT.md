@@ -21,7 +21,7 @@ The Nexiuum-side traceability number for a PO. Issued by Nexiuum upstream and ca
 The customer-facing differentiator between Orders sharing the same N#. One PS item = one Flavor (e.g., "Strawberry", "Strawberry Banana", "Cherry Lime"). The engine reads the Flavor as a label off the PS item, carries it on Order, and uses it alongside N# on Slot names and Marey lane labels so operators can tell which of the (potentially many) Orders under a single N# they're looking at. Like N#, it's a label not a key.
 
 **Blend Record**:
-A downstream artifact on the Gray Space Blend Records board, created 1:1 for Orders whose Process includes a blending or pressing stage. In Phase 1 this board was the engine's input trigger; in Phase 2D+ it is just a downstream side-effect of a `Pressing` stage. Not a scheduling input in the new flow.
+A row on the Gray Space Blend Records board representing the blending/pressing work for one Order. Created by an upstream Monday workflow when a Production Schedule item that requires blending/pressing is created — carrying the spec-sheet data — and landing with a Blend Status that is not yet `Blending` (the board's status set is `Pending / Blending / Pressing / Dedusting/Packaging / Done / Stuck`; new records start at `Pending`). Its **Blend Status** is the engine's press-scheduling trigger: when Gray Space sets it to `Blending`, the engine releases that Order's press + downstream stages onto the schedule (see Reactive scope). Later transitions drive actuals: `Pressing → actual_start`, `Done → actual_end`. The engine reads this board (status webhooks) but never creates or writes it.
 _Avoid_: Batch, Press Record
 
 ### Monday boards
@@ -127,7 +127,8 @@ The engine reacts to the following events. All other event types in the codebase
 | Event | Source | Engine action |
 |---|---|---|
 | `ScheduleNewOrder` | direct `/commit` call | Plan and write Slots for the new Order |
-| `SpecSheetItemReady` | Monday automation webhook on Production Schedule | Read PS item's Spec Sheet Payload, derive a `ScheduleNewOrder`, plan and write Slots |
+| `SpecSheetItemReady` | Monday webhook on Production Schedule (create_item) | Read the PS item's Spec Sheet Payload and derive an Order. **Route-gated (ADR-0004):** pressing orders (`include_press=True`) are **not** placed here — they defer to `BlendingStarted` and surface only in the backlog lane. Kitting-Only orders (`include_press=False`) plan + write Slots now, press stage skipped. |
+| `BlendingStarted` | Blend Records status → "Blending" webhook | **Press-scheduling trigger (ADR-0004).** Resolve the Blend Record to its PS item (#23), re-ingest the payload, and plan + write the full press + packaging chain. |
 | `ActualStartReported` | Blend Records status → "Pressing" webhook | Stamp `actual_start` + `Status=Running` on the linked Slot |
 | `ActualEndReported` | Blend Records status → "Done" webhook | Stamp `actual_end` + `Status=Done`, then Baton-pass push to dependent Stages |
 | `DriftDetected` | 15-min Sweep | Stamp `drift_last_detected_at` on the late Slot. No Reflow. |

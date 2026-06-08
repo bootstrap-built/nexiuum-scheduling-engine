@@ -38,6 +38,10 @@ from engine.core.spec_sheet import (
     build_schedule_order,
     parse_spec_sheet_payload,
 )
+from engine.io.blend_records_io import (
+    BlendRecordReadError,
+    read_blend_record_ps_item_id,
+)
 from engine.io.spec_sheet_io import (
     ProductionScheduleReadError,
     SpecSheetPayloadAbsent,
@@ -46,6 +50,7 @@ from engine.io.spec_sheet_io import (
 from engine.models import (
     ActualEndReported,
     ActualStartReported,
+    BlendingStarted,
     CapacityChanged,
     DriftDetected,
     Event,
@@ -112,6 +117,39 @@ def last_error() -> str | None:
 # ─────────────────────────────────────────────────────────────────────────
 
 
+async def _build_order_from_ps_item(item_id: str) -> ScheduleNewOrder | None:
+    """Read a Production Schedule item, parse its Spec Sheet Payload, and build
+    a ScheduleNewOrder. Returns None (with a logged reason) for the benign
+    skip/reject cases — unsupported route, unsupported product, absent payload,
+    or a parse/read error. Shared by the SpecSheetItemReady (create_item) and
+    BlendingStarted handlers so both ingest a PS item identically.
+    """
+    try:
+        ingest = await read_ps_item_for_ingest(item_id)
+        payload = parse_spec_sheet_payload(ingest.payload_text)
+        return build_schedule_order(
+            payload, job_reference_id=item_id, n_number=ingest.n_number,
+        )
+    except UnsupportedManufacturingRouteError as e:
+        log.info("PS item=%s skipped: %s", item_id, e)
+        return None
+    except UnsupportedProductTypeError as e:
+        # Warning, not error, so /health stays green — operator data-entry /
+        # missing-recipe is expected during the MVP rollout.
+        log.warning("PS item=%s rejected: %s", item_id, e)
+        return None
+    except SpecSheetPayloadAbsent as e:
+        # Shared board: create_pulse fires for every new item, but only Nexiuum
+        # form orders carry a Spec Sheet Payload. No payload = not ours → skip
+        # quietly (info, not error) so the regular production flow's item
+        # creations don't read as ingest failures.
+        log.info("PS item=%s skipped: %s", item_id, e)
+        return None
+    except (SpecSheetParseError, ProductionScheduleReadError) as e:
+        log.error("PS item=%s ingest failed: %s", item_id, e)
+        return None
+
+
 async def process_event(event: Event) -> ApplyResult | None:
     """Dispatch one event to its handler, run pure-core, apply Plan.
 
@@ -128,51 +166,46 @@ async def process_event(event: Event) -> ApplyResult | None:
         return await _apply_or_noop(plan, label="ScheduleNewOrder")
 
     if isinstance(event, SpecSheetItemReady):
-        # Phase 2D — translate a Production Schedule item into a
-        # ScheduleNewOrder + reuse the existing planning path. Reading
-        # Monday for the payload happens here (IO shell), translation
-        # is pure-core in engine.core.spec_sheet.
-        try:
-            ingest = await read_ps_item_for_ingest(event.item_id)
-            payload = parse_spec_sheet_payload(ingest.payload_text)
-            order = build_schedule_order(
-                payload,
-                job_reference_id=event.item_id,
-                n_number=ingest.n_number,
-            )
-        except UnsupportedManufacturingRouteError as e:
+        # Phase 2D / ADR-0004 — translate a Production Schedule item into a
+        # ScheduleNewOrder. A pressing order is NOT placed at create_item: it
+        # waits for the Blend Record to flip to "Blending" and surfaces only in
+        # the derived backlog lane (#21) until then. Kitting-Only orders are
+        # already-pressed inventory and schedule now (press stage skipped).
+        order = await _build_order_from_ps_item(event.item_id)
+        if order is None:
+            return None
+        if order.include_press:
             log.info(
-                "SpecSheetItemReady item=%s skipped: %s",
-                event.item_id, e,
-            )
-            return None
-        except UnsupportedProductTypeError as e:
-            # Surface as warning (not error) so /health stays green —
-            # operator data-entry / missing-recipe is expected during
-            # the MVP rollout.
-            log.warning(
-                "SpecSheetItemReady item=%s rejected: %s",
-                event.item_id, e,
-            )
-            return None
-        except SpecSheetPayloadAbsent as e:
-            # Shared board: create_pulse fires for every new item, but only
-            # Nexiuum form orders carry a Spec Sheet Payload. No payload =
-            # not ours → skip quietly (info, not error) so the regular
-            # production flow's item creations don't read as ingest failures.
-            log.info(
-                "SpecSheetItemReady item=%s skipped: %s",
-                event.item_id, e,
-            )
-            return None
-        except (SpecSheetParseError, ProductionScheduleReadError) as e:
-            log.error(
-                "SpecSheetItemReady item=%s ingest failed: %s",
-                event.item_id, e,
+                "SpecSheetItemReady item=%s deferred to Blending (ADR-0004): "
+                "pressing order not placed at create_item; surfaces in backlog",
+                event.item_id,
             )
             return None
         plan = plan_for_new_order(snapshot, order, now=now)
         return await _apply_or_noop(plan, label=f"SpecSheetItemReady[{event.item_id}]")
+
+    if isinstance(event, BlendingStarted):
+        # ADR-0004 — the press-scheduling trigger. Resolve the Blend Record to
+        # its originating PS item (#23), re-ingest the payload, and place the
+        # full press + packaging chain. This is the moment a deferred pressing
+        # order leaves the backlog and lands on machines.
+        try:
+            ps_item_id = await read_blend_record_ps_item_id(event.blend_record_id)
+        except BlendRecordReadError as e:
+            log.error("BlendingStarted blend=%s read failed: %s", event.blend_record_id, e)
+            return None
+        if ps_item_id is None:
+            log.warning(
+                "BlendingStarted blend=%s: no linked PS item (source-item column "
+                "blank) — can't correlate to an Order, skipping",
+                event.blend_record_id,
+            )
+            return None
+        order = await _build_order_from_ps_item(ps_item_id)
+        if order is None:
+            return None
+        plan = plan_for_new_order(snapshot, order, now=now)
+        return await _apply_or_noop(plan, label=f"BlendingStarted[{ps_item_id}]")
 
     if isinstance(event, ActualStartReported):
         plan = plan_for_actual_start(snapshot, event)
