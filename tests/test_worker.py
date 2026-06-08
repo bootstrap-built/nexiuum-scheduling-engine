@@ -389,7 +389,7 @@ async def test_process_event_spec_sheet_item_ready_schedules():
         "product_type": "Tablets",
         "tablet_size": "12mm Bisect",
         "is_dual": False,
-        "manufacturing_route": "Manufacturing + Packaging",
+        "manufacturing_route": "Manufacturing + Kitting",
         "actives": [{"name": "Caffeine", "mg": 200}],
         "packaging_type": "Blister",
         "flavors": [
@@ -469,7 +469,7 @@ async def test_process_event_spec_sheet_unsupported_product_logged_no_raise():
     payload = {
         "product_type": "Capsules",
         "capsule_size": "0",
-        "manufacturing_route": "Manufacturing + Packaging",
+        "manufacturing_route": "Manufacturing + Kitting",
         "actives": [{"name": "X", "mg": 100}],
         "packaging_type": "Blister",
         "flavors": [{"flavor": "Test", "qty": 1000, "packaging_breakdown": []}],
