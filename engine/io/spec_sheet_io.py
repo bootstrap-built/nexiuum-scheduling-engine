@@ -7,6 +7,7 @@ touching the pure-core logic.
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -112,6 +113,22 @@ async def read_ps_item_for_ingest(item_id: str) -> PSItemIngest:
     return PSItemIngest(payload_text=payload_text, n_number=n_number)
 
 
+# Backlog-candidate scan is cached: /schedule.json polls every ~30s, often from
+# several viewers at once, and a per-poll board read is what blew Monday's
+# rate limit (starving read_snapshot → 500s). The scan now reads only two
+# columns and is memoised for this TTL, so at most one cheap scan runs per
+# window regardless of poll/viewer count. A new backlog order takes up to the
+# TTL to appear — fine for a visibility lane.
+_CANDIDATES_TTL_SECONDS = 30.0
+_candidates_cache: tuple[float, list[ScheduleNewOrder]] | None = None
+
+
+def reset_backlog_candidates_cache() -> None:
+    """Drop the cached backlog candidates (test hook / manual invalidation)."""
+    global _candidates_cache
+    _candidates_cache = None
+
+
 async def list_pressing_backlog_candidates() -> list[ScheduleNewOrder]:
     """Scan the Production Schedule board for pressing orders the engine could
     schedule — the candidate set for the derived backlog lane (#21, ADR-0004).
@@ -122,15 +139,26 @@ async def list_pressing_backlog_candidates() -> list[ScheduleNewOrder]:
     product/route, or a malformed payload are skipped quietly — the backlog is a
     best-effort visibility view, not an authoritative schedule.
 
-    Returns `[]` when the Nexiuum token isn't configured (the engine simply
-    shows no backlog rather than erroring the whole /schedule.json render).
+    Only the Spec Sheet Payload + N# columns are fetched (column-filtered, to
+    keep Monday query complexity low), and the result is cached for
+    `_CANDIDATES_TTL_SECONDS`. Returns `[]` when the Nexiuum token isn't
+    configured (the engine simply shows no backlog).
     """
+    global _candidates_cache
     s = get_settings()
     if not s.nexiuum_monday_token:
         return []
 
+    now = time.monotonic()
+    cached = _candidates_cache
+    if cached is not None and now - cached[0] < _CANDIDATES_TTL_SECONDS:
+        return cached[1]
+
     async with nexiuum_client() as client:
-        items = await client.fetch_board_items(s.nexiuum_production_schedule_board)
+        items = await client.fetch_board_items(
+            s.nexiuum_production_schedule_board,
+            column_ids=[s.col_ps_spec_sheet_payload, s.col_ps_n_number],
+        )
 
     candidates: list[ScheduleNewOrder] = []
     for item in items:
@@ -152,6 +180,8 @@ async def list_pressing_backlog_candidates() -> list[ScheduleNewOrder]:
             continue
         if order.include_press:
             candidates.append(order)
+
+    _candidates_cache = (now, candidates)
     return candidates
 
 

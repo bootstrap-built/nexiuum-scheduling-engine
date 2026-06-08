@@ -51,6 +51,7 @@ async def _reset_engine_singletons():
     """
     from engine.config import reset_settings_for_tests as reset_settings
     from engine.io import engine_identity
+    from engine.io.spec_sheet_io import reset_backlog_candidates_cache
     from engine.io.sweep import reset_state_for_tests as reset_sweep
     from engine.io.sweep import stop_sweep
     from engine.io.worker import reset_state_for_tests as reset_worker
@@ -63,6 +64,7 @@ async def _reset_engine_singletons():
     reset_sweep()
     reset_worker()
     reset_settings()
+    reset_backlog_candidates_cache()
     engine_identity.reset_engine_user_id()
 
     yield

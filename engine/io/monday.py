@@ -51,6 +51,34 @@ _NEXT_ITEMS_PAGE_QUERY = (
     + " } } }"
 )
 
+# Column-filtered variants — pull only the named columns, which slashes Monday
+# query complexity (and the per-minute rate-limit pressure) when the caller
+# needs just a field or two off a whole board (e.g. the backlog scan reading
+# Spec Sheet Payload + N#). Mirror the typed unions so board_relation /
+# mirror columns still surface display_value.
+_FILTERED_COLUMN_VALUES = """
+column_values(ids: $cols) {
+  id
+  text
+  value
+  type
+  ... on BoardRelationValue { linked_item_ids display_value }
+  ... on MirrorValue { display_value }
+}
+"""
+
+_FIRST_ITEMS_PAGE_QUERY_COLS = (
+    "query ($board: ID!, $cols: [String!]) { boards(ids: [$board]) { items_page(limit: %d) { cursor items { id name "
+    + _FILTERED_COLUMN_VALUES
+    + " } } } }"
+)
+
+_NEXT_ITEMS_PAGE_QUERY_COLS = (
+    "query ($cursor: String!, $cols: [String!]) { next_items_page(limit: %d, cursor: $cursor) { cursor items { id name "
+    + _FILTERED_COLUMN_VALUES
+    + " } } }"
+)
+
 
 class MondayError(RuntimeError):
     """Raised when Monday returns errors in the GraphQL response."""
@@ -212,23 +240,38 @@ class MondayClient:
         board_id: int,
         *,
         page_size: int = 500,
+        column_ids: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Fetch all items on a board with their column values.
 
         Paginates via items_page cursor. Returns a flat list of item dicts:
             { "id": str, "name": str, "column_values": [...] }
+
+        When `column_ids` is given, only those columns are requested — far less
+        Monday query complexity (and rate-limit pressure) than pulling every
+        column. Pass it whenever the caller needs only a field or two off a
+        whole board.
         """
         items: list[dict[str, Any]] = []
         cursor: str | None = None
+        filtered = bool(column_ids)
 
         while True:
             if cursor:
-                query = _NEXT_ITEMS_PAGE_QUERY % page_size
-                data = await self.query(query, {"cursor": cursor})
+                if filtered:
+                    query = _NEXT_ITEMS_PAGE_QUERY_COLS % page_size
+                    data = await self.query(query, {"cursor": cursor, "cols": column_ids})
+                else:
+                    query = _NEXT_ITEMS_PAGE_QUERY % page_size
+                    data = await self.query(query, {"cursor": cursor})
                 page = data["next_items_page"]
             else:
-                query = _FIRST_ITEMS_PAGE_QUERY % page_size
-                data = await self.query(query, {"board": str(board_id)})
+                if filtered:
+                    query = _FIRST_ITEMS_PAGE_QUERY_COLS % page_size
+                    data = await self.query(query, {"board": str(board_id), "cols": column_ids})
+                else:
+                    query = _FIRST_ITEMS_PAGE_QUERY % page_size
+                    data = await self.query(query, {"board": str(board_id)})
                 boards = data.get("boards", [])
                 if not boards:
                     return items

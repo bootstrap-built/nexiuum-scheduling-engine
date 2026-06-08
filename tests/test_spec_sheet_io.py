@@ -186,7 +186,11 @@ def _board_client(items):
 @pytest.mark.asyncio
 async def test_list_backlog_candidates_returns_only_pressing(monkeypatch):
     monkeypatch.setenv("MONDAY_NEXIUUM_TOKEN", "tok")
-    from engine.io.spec_sheet_io import list_pressing_backlog_candidates
+    from engine.io.spec_sheet_io import (
+        list_pressing_backlog_candidates,
+        reset_backlog_candidates_cache,
+    )
+    reset_backlog_candidates_cache()
 
     items = [
         _ps_item("ps-1", _tablet_payload("Manufacturing"), n_display="N1"),
@@ -196,20 +200,49 @@ async def test_list_backlog_candidates_returns_only_pressing(monkeypatch):
         {"id": "ps-5", "name": "bad", "column_values": [
             {"id": S.col_ps_spec_sheet_payload, "text": "{not-json"}]},
     ]
-    with patch(
-        "engine.io.spec_sheet_io.nexiuum_client", return_value=_board_client(items)
-    ):
+    client = _board_client(items)
+    with patch("engine.io.spec_sheet_io.nexiuum_client", return_value=client):
         candidates = await list_pressing_backlog_candidates()
 
     assert [o.job_reference_id for o in candidates] == ["ps-1"]
     assert candidates[0].include_press is True
     assert candidates[0].n_number == "N1"
+    # Column-filtered: only the payload + N# columns are fetched (rate-limit fix).
+    _, kwargs = client.fetch_board_items.call_args
+    assert kwargs["column_ids"] == [S.col_ps_spec_sheet_payload, S.col_ps_n_number]
+    reset_backlog_candidates_cache()
+
+
+@pytest.mark.asyncio
+async def test_list_backlog_candidates_cached_within_ttl(monkeypatch):
+    """A second call inside the TTL reuses the cache — no second board read."""
+    monkeypatch.setenv("MONDAY_NEXIUUM_TOKEN", "tok")
+    from engine.io.spec_sheet_io import (
+        list_pressing_backlog_candidates,
+        reset_backlog_candidates_cache,
+    )
+    reset_backlog_candidates_cache()
+
+    items = [_ps_item("ps-1", _tablet_payload("Manufacturing"), n_display="N1")]
+    client = _board_client(items)
+    with patch("engine.io.spec_sheet_io.nexiuum_client", return_value=client):
+        first = await list_pressing_backlog_candidates()
+        second = await list_pressing_backlog_candidates()
+
+    assert [o.job_reference_id for o in first] == ["ps-1"]
+    assert second == first
+    client.fetch_board_items.assert_awaited_once()  # cached on the second call
+    reset_backlog_candidates_cache()
 
 
 @pytest.mark.asyncio
 async def test_list_backlog_candidates_empty_without_token(monkeypatch):
     monkeypatch.delenv("MONDAY_NEXIUUM_TOKEN", raising=False)
-    from engine.io.spec_sheet_io import list_pressing_backlog_candidates
+    from engine.io.spec_sheet_io import (
+        list_pressing_backlog_candidates,
+        reset_backlog_candidates_cache,
+    )
+    reset_backlog_candidates_cache()
 
     # No token → empty list, no Monday call attempted.
     assert await list_pressing_backlog_candidates() == []
