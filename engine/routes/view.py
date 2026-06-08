@@ -401,6 +401,15 @@ function groupOf(pg) {
 const GROUP_ORDER = ['press', 'capsule', 'pkg'];
 const GROUP_LABEL = {press:'PRESS', capsule:'CAPSULE', pkg:'PACKAGING'};
 
+// Canonical process-flow order. Lanes within a band sort by their group's
+// position in this list (then by name) so a job reads top-to-bottom along the
+// real flow — pressing at the top, packaging descending in process order
+// (blister/lot-coding before clamshell, etc.). Keeps an order's stages
+// monotonic and stops the dependency lines (#29) from zig-zagging. Unknown
+// groups sort last. (#30)
+const FLOW_ORDER = ['Pressing', 'Capsule', 'Blister', 'Lot Coder', 'Clamshell', 'Sachet', 'Bottle', 'Hand-pack'];
+function flowRank(pg) { const i = FLOW_ORDER.indexOf(pg); return i === -1 ? 999 : i; }
+
 function hashColor(s) {
   if (!s) return JOB_COLORS[0];
   let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
@@ -431,9 +440,15 @@ async function fetchSnap() {
 function render() {
   if (!state.snap) return;
   const snap = state.snap;
-  // Bucket machines by group, preserve snapshot order within
+  // Bucket machines by band, then order each band by process-flow position so
+  // lanes descend along the real flow (#30) instead of arbitrary snapshot order.
   const byGroup = {press:[], capsule:[], pkg:[]};
   for (const m of snap.machines) byGroup[groupOf(m.process_group)].push(m);
+  for (const g of GROUP_ORDER) {
+    byGroup[g].sort((a, b) =>
+      flowRank(a.process_group) - flowRank(b.process_group) ||
+      String(a.name).localeCompare(String(b.name)));
+  }
 
   // Build labels
   const labels = document.getElementById('labels');

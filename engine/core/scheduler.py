@@ -33,7 +33,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Literal
 
 from engine.core.labels import compose_slot_name
-from engine.core.placement import find_earliest_start
+from engine.core.placement import add_working_hours, find_earliest_start
 from engine.core.routing import eligible_machines
 from engine.models import (
     CONTAINER_CAPACITY_GROUPS,
@@ -52,6 +52,18 @@ from engine.models import (
 
 if TYPE_CHECKING:
     from engine.config import Settings
+
+
+# The press-class machine group. Pressing → packaging is the one stage edge
+# that carries a planned rest buffer (#28).
+PRESS_MACHINE_CLASS: ProcessGroup = "Pressing"
+
+# Fixed working-hours buffer inserted between the pressing stage's end and the
+# start of its downstream packaging stage(s) — the pressed product rests before
+# packaging. Counted on the downstream machine's working window (closed hours
+# don't burn the gap). Deliberately a fixed constant, not a Settings knob, and
+# distinct from the reactive 30-min cross_stage_handoff_buffer baton-pass. (#28)
+PRESS_TO_PACKAGING_BUFFER_HOURS = 4
 
 
 class DanglingRecipeError(RuntimeError):
@@ -338,17 +350,6 @@ def _place_stages(
     pending_by_machine: dict[str, list[Slot]] = {}
 
     for spec in stage_specs:
-        # Earliest this stage could start = max-end across ALL chunks of
-        # each predecessor stage. If press splits across 2 machines and
-        # they finish at T1 and T2, packaging waits for max(T1, T2).
-        predecessor_ends = []
-        for dep_id in spec.depends_on:
-            if dep_id in placements:
-                predecessor_ends.append(
-                    max(p.end for p in placements[dep_id])
-                )
-        earliest_allowed = max(predecessor_ends + [now])
-
         candidates = eligible_machines(
             snapshot, machine_class=spec.machine_class, order=order,
         )
@@ -357,6 +358,28 @@ def _place_stages(
                 spec.stage_id, spec.machine_class,
                 reason=_diagnose_no_candidates(snapshot, spec.machine_class),
             )
+
+        # Earliest this stage could start = max-end across ALL chunks of each
+        # predecessor stage (floored at now). If press splits across 2 machines
+        # finishing at T1/T2, packaging waits for max(T1, T2).
+        #
+        # On the pressing → downstream edge, insert the fixed working-hours rest
+        # buffer before the downstream stage may start. It's counted on the
+        # downstream machine's working window via a representative candidate
+        # (machines of one class share a window). Only this edge is buffered —
+        # blister→clamshell and other handoffs are not. (#28)
+        predecessor_ends = [now]
+        for dep_id in spec.depends_on:
+            if dep_id not in placements:
+                continue
+            pred_end = max(p.end for p in placements[dep_id])
+            pred_class = placements[dep_id][0].spec.machine_class
+            if pred_class == PRESS_MACHINE_CLASS and spec.machine_class != PRESS_MACHINE_CLASS:
+                pred_end = add_working_hours(
+                    pred_end, PRESS_TO_PACKAGING_BUFFER_HOURS, candidates[0],
+                )
+            predecessor_ends.append(pred_end)
+        earliest_allowed = max(predecessor_ends)
 
         should_split = (
             spec.machine_class in SPLITTABLE_PROCESS_GROUPS

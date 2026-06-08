@@ -225,6 +225,21 @@ def test_view_escapes_user_data_in_popover():
     assert "esc(m.name)" in r.text
 
 
+def test_view_orders_lanes_by_process_flow():
+    """The renderer ships a canonical FLOW_ORDER and sorts lanes by it so a
+    job's stages descend monotonically (#30). Guards against the flow sort
+    being dropped back to arbitrary snapshot order."""
+    with TestClient(app) as c:
+        r = c.get("/view")
+    assert "const FLOW_ORDER = [" in r.text
+    # Flow positions blister/lot-coding before clamshell (the DAG order).
+    text = r.text
+    assert text.index("'Blister'") < text.index("'Clamshell'")
+    assert text.index("'Lot Coder'") < text.index("'Clamshell'")
+    # The bucket sort applies flowRank.
+    assert "flowRank(a.process_group)" in text
+
+
 def test_schedule_json_serializes_dependent_on_ids():
     """Each slot exposes dependent_on_ids so the view can draw dependency
     lines (#29). Empty tuple → empty list; populated tuple round-trips."""
