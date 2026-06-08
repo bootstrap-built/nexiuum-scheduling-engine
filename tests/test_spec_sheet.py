@@ -46,7 +46,7 @@ def _payload_dict(**overrides) -> dict:
         "product_type": "Tablets",
         "tablet_size": "12mm Bisect",
         "is_dual": False,
-        "manufacturing_route": "Manufacturing + Packaging",
+        "manufacturing_route": "Manufacturing + Kitting",
         "actives": [{"name": "Caffeine", "mg": 200}],
         "packaging_type": "Blister",
         "flavors": [
@@ -138,15 +138,15 @@ def test_recipe_key_other_products_raise(product):
 
 
 def test_route_manufacturing_plus_packaging_default():
-    p = parse_spec_sheet_payload(_payload_json(manufacturing_route="Manufacturing + Packaging"))
+    p = parse_spec_sheet_payload(_payload_json(manufacturing_route="Manufacturing + Kitting"))
     should, press, prio = resolve_route(p)
     assert should is True
     assert press is True
     assert prio == Priority.NORMAL
 
 
-def test_route_packaging_only_skips_press():
-    p = parse_spec_sheet_payload(_payload_json(manufacturing_route="Packaging"))
+def test_route_kitting_only_skips_press():
+    p = parse_spec_sheet_payload(_payload_json(manufacturing_route="Kitting Only"))
     _should, press, _prio = resolve_route(p)
     assert press is False
 
@@ -157,14 +157,6 @@ def test_route_samples_does_not_schedule():
     assert should is False
 
 
-def test_route_hot_shot_expedite():
-    p = parse_spec_sheet_payload(_payload_json(manufacturing_route="Hot Shot"))
-    should, press, prio = resolve_route(p)
-    assert should is True
-    assert press is True
-    assert prio == Priority.EXPEDITE
-
-
 def test_route_missing_defaults_to_manufacturing_plus_packaging():
     p = parse_spec_sheet_payload(_payload_json(manufacturing_route=""))
     should, press, _prio = resolve_route(p)
@@ -172,7 +164,7 @@ def test_route_missing_defaults_to_manufacturing_plus_packaging():
     assert should is True
     assert press is True
     # The default constant is documented; sanity check it.
-    assert DEFAULT_ROUTE == "Manufacturing + Packaging"
+    assert DEFAULT_ROUTE == "Manufacturing + Kitting"
 
 
 def test_route_unknown_raises():

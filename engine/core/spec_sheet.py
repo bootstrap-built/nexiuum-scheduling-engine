@@ -19,8 +19,7 @@ Translation responsibilities:
    product-specific recipes). MVP supports Tablets only; other product
    types raise `UnsupportedProductTypeError`.
 3. Apply the manufacturing-route filter — some routes shouldn't trigger
-   scheduling at all (Samples), some skip the press stage (Packaging),
-   some get Expedite priority (Hot Shot).
+   scheduling at all (Samples), some skip the press stage (Kitting Only).
 4. Build the `PackagingSlice` tuple from the flavor's
    `packaging_breakdown`. Maps form's freeform `packaging_type` string
    to engine's `ProcessGroup` literal.
@@ -159,25 +158,26 @@ RECIPE_KEY_BY_PRODUCT_TYPE: dict[str, str] = {
 }
 
 # Manufacturing route → (should_schedule, include_press, priority).
-# Defaults per the Phase 2D design discussion 2026-05-27:
-#  - Manufacturing / Manufacturing + Packaging / Keep for Packaging /
-#    Ship Bulk all schedule the press stage (Ship Bulk skips packaging by
-#    having no breakdown to apply).
-#  - Packaging skips press (already-pressed inventory).
+# KEYS MUST MATCH the form's route list verbatim — nexiuum-spec-sheet-form's
+# app/route_metadata.py MANUFACTURING_ROUTE_OPTIONS is the source of truth. The
+# 2026-06-03 meeting relabeled "Packaging" → "Kitting" form-side (PR #25); the
+# engine drifted and silently skipped every "* Kitting" order as an unknown
+# route. Mirror of route_metadata's presses/packages axes:
+#  - Manufacturing / Manufacturing + Kitting / Keep for Kitting / Ship Bulk
+#    all press (include_press=True).
+#  - Kitting Only is already-pressed inventory → skips press.
 #  - Samples is small enough that ops handles it outside the scheduler.
-#  - Hot Shot is the same as Manufacturing + Packaging plus Expedite.
 ROUTE_RULES: dict[str, tuple[bool, bool, Priority]] = {
-    "Manufacturing":             (True,  True,  Priority.NORMAL),
-    "Manufacturing + Packaging": (True,  True,  Priority.NORMAL),
-    "Packaging":                 (True,  False, Priority.NORMAL),
-    "Keep for Packaging":        (True,  True,  Priority.NORMAL),
-    "Ship Bulk":                 (True,  True,  Priority.NORMAL),
-    "Samples":                   (False, False, Priority.NORMAL),
-    "Hot Shot":                  (True,  True,  Priority.EXPEDITE),
+    "Manufacturing":           (True,  True,  Priority.NORMAL),
+    "Manufacturing + Kitting": (True,  True,  Priority.NORMAL),
+    "Kitting Only":            (True,  False, Priority.NORMAL),
+    "Keep for Kitting":        (True,  True,  Priority.NORMAL),
+    "Ship Bulk":               (True,  True,  Priority.NORMAL),
+    "Samples":                 (False, False, Priority.NORMAL),
 }
-# Empty/missing route is treated as "Manufacturing + Packaging" — the most
-# common case. Better default than silently rejecting.
-DEFAULT_ROUTE = "Manufacturing + Packaging"
+# Empty/missing route is treated as "Manufacturing + Kitting" — the most common
+# case. Better default than silently rejecting.
+DEFAULT_ROUTE = "Manufacturing + Kitting"
 
 
 # Maps form-side packaging type string → engine ProcessGroup. Case-
@@ -229,7 +229,7 @@ def derive_recipe_key(payload: SpecSheetPayload) -> str:
 def resolve_route(payload: SpecSheetPayload) -> tuple[bool, bool, Priority]:
     """Returns (should_schedule, include_press, priority).
 
-    Defaults to "Manufacturing + Packaging" when route is missing
+    Defaults to "Manufacturing + Kitting" when route is missing
     (rather than skipping work — too easy to lose orders to a typo).
     Unknown non-empty route strings raise — better to surface an explicit
     error than to default-route unfamiliar workflow tags.
