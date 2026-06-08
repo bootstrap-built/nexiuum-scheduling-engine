@@ -149,3 +149,67 @@ async def test_read_ps_item_for_ingest_blank_payload_raises(monkeypatch):
         # Subclass relationship holds — broad handlers still catch it.
         with pytest.raises(ProductionScheduleReadError):
             await read_ps_item_for_ingest("ps-3")
+
+
+# ─── list_pressing_backlog_candidates — PS board scan (#21) ─────────────────
+
+
+def _ps_item(item_id, payload_dict, n_display=None):
+    import json as _json
+    cvs = [{"id": S.col_ps_spec_sheet_payload, "text": _json.dumps(payload_dict)}]
+    if n_display is not None:
+        cvs.append({"id": S.col_ps_n_number, "display_value": n_display})
+    return {"id": item_id, "name": f"item {item_id}", "column_values": cvs}
+
+
+def _tablet_payload(route="Manufacturing", qty=100000):
+    return {
+        "product_type": "Tablets",
+        "tablet_size": "12mm Bisect",
+        "is_dual": False,
+        "manufacturing_route": route,
+        "actives": [{"name": "Caffeine", "mg": 200}],
+        "packaging_type": "Blister",
+        "flavors": [{"flavor": "Strawberry", "qty": qty, "packaging_breakdown": []}],
+        "flavor_index": 0,
+    }
+
+
+def _board_client(items):
+    client = MagicMock()
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=None)
+    client.fetch_board_items = AsyncMock(return_value=items)
+    return client
+
+
+@pytest.mark.asyncio
+async def test_list_backlog_candidates_returns_only_pressing(monkeypatch):
+    monkeypatch.setenv("MONDAY_NEXIUUM_TOKEN", "tok")
+    from engine.io.spec_sheet_io import list_pressing_backlog_candidates
+
+    items = [
+        _ps_item("ps-1", _tablet_payload("Manufacturing"), n_display="N1"),
+        _ps_item("ps-2", _tablet_payload("Kitting Only")),       # include_press=False
+        _ps_item("ps-3", _tablet_payload("Samples")),            # should_schedule=False → skip
+        {"id": "ps-4", "name": "no payload", "column_values": []},  # not a form order
+        {"id": "ps-5", "name": "bad", "column_values": [
+            {"id": S.col_ps_spec_sheet_payload, "text": "{not-json"}]},
+    ]
+    with patch(
+        "engine.io.spec_sheet_io.nexiuum_client", return_value=_board_client(items)
+    ):
+        candidates = await list_pressing_backlog_candidates()
+
+    assert [o.job_reference_id for o in candidates] == ["ps-1"]
+    assert candidates[0].include_press is True
+    assert candidates[0].n_number == "N1"
+
+
+@pytest.mark.asyncio
+async def test_list_backlog_candidates_empty_without_token(monkeypatch):
+    monkeypatch.delenv("MONDAY_NEXIUUM_TOKEN", raising=False)
+    from engine.io.spec_sheet_io import list_pressing_backlog_candidates
+
+    # No token → empty list, no Monday call attempted.
+    assert await list_pressing_backlog_candidates() == []

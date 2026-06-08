@@ -20,12 +20,17 @@ from fastapi import APIRouter
 from fastapi.responses import HTMLResponse
 
 from engine.config import get_settings
+from engine.core.backlog import BacklogEntry, derive_backlog
 from engine.core.labels import compose_lane_label, is_n_number
 from engine.io.monday import MondayClient, gray_space_client
 from engine.io.snapshot import read_snapshot
+from engine.io.spec_sheet_io import list_pressing_backlog_candidates
 from engine.models import Machine, Slot, Snapshot
 
+import logging
+
 router = APIRouter(tags=["view"])
+log = logging.getLogger(__name__)
 
 
 def _iso(dt: datetime | None) -> str | None:
@@ -103,6 +108,37 @@ def _snapshot_to_dict(snap: Snapshot, enrich: dict[str, dict[str, Any]]) -> dict
     }
 
 
+def _backlog_entry_to_dict(e: BacklogEntry) -> dict[str, Any]:
+    """Serialize one backlog row for the renderer's Backlog lane (#21).
+
+    `estimated_hours` is the bar length (None → no bar, identity only).
+    `lane_label` reuses the slot identity composer so backlog rows read the
+    same as placed slots (N# · Flavor).
+    """
+    return {
+        "job_reference_id": e.job_reference_id,
+        "n_number": e.n_number,
+        "flavor": e.flavor,
+        "quantity": e.quantity,
+        "estimated_hours": e.estimated_hours,
+        "lane_label": compose_lane_label(e.n_number, e.flavor, e.job_reference_id),
+    }
+
+
+async def _derive_backlog_for_view(snap: Snapshot) -> list[BacklogEntry]:
+    """Scan the Production Schedule board for pressing orders not yet placed and
+    estimate each one's duration. Best-effort: a Monday read failure logs and
+    yields an empty backlog rather than breaking the whole /schedule.json render
+    (the backlog lane is visibility, not the authoritative schedule)."""
+    try:
+        candidates = await list_pressing_backlog_candidates()
+    except Exception:  # noqa: BLE001 — never let backlog break the chart
+        log.exception("backlog candidate scan failed; rendering empty backlog lane")
+        return []
+    placed = {s.job_reference_id for s in snap.slots if s.job_reference_id}
+    return derive_backlog(candidates, placed, snap.machines)
+
+
 async def _fetch_blend_enrichment(
     job_ids: set[str],
     client: MondayClient | None = None,
@@ -158,7 +194,10 @@ async def schedule_json() -> dict[str, Any]:
     snap = await read_snapshot()
     job_ids = {s.job_reference_id for s in snap.slots if s.job_reference_id}
     enrich = await _fetch_blend_enrichment(job_ids)
-    return _snapshot_to_dict(snap, enrich)
+    out = _snapshot_to_dict(snap, enrich)
+    backlog = await _derive_backlog_for_view(snap)
+    out["backlog"] = [_backlog_entry_to_dict(e) for e in backlog]
+    return out
 
 
 @router.get("/view", response_class=HTMLResponse)
@@ -199,6 +238,25 @@ _MAREY_HTML = r"""<!doctype html>
     --font:'Archivo',system-ui,sans-serif; --mono:'IBM Plex Mono',ui-monospace,monospace;
   }
   *{box-sizing:border-box;margin:0;padding:0}
+  /* Backlog strip (#21) — derived lane of approved-but-not-yet-Blending press
+     orders, shown below the chart. Visibility only; bars are estimates. */
+  .backlog{flex:0 0 auto;background:var(--panel);border-top:1px solid var(--line);
+    padding:8px 16px}
+  .bk-hd{display:flex;justify-content:space-between;align-items:center;
+    font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;
+    color:var(--txt-faint);margin-bottom:6px}
+  .bk-hd .bk-sub{font-family:var(--mono);text-transform:none;letter-spacing:0}
+  .bk-rows{display:flex;flex-direction:column;gap:4px;max-height:132px;overflow:auto}
+  .bk-row{display:grid;grid-template-columns:var(--gutter) 1fr;align-items:center;
+    gap:10px;height:22px}
+  .bk-row .bk-lbl{font-size:11px;color:var(--txt);white-space:nowrap;
+    overflow:hidden;text-overflow:ellipsis}
+  .bk-track{position:relative;height:14px;background:var(--grid);border-radius:3px}
+  .bk-bar{position:absolute;left:0;top:0;height:14px;border-radius:3px;min-width:3px;
+    background:repeating-linear-gradient(45deg,rgba(60,155,224,.55),
+      rgba(60,155,224,.55) 6px,rgba(60,155,224,.3) 6px,rgba(60,155,224,.3) 12px)}
+  .bk-est{position:absolute;right:5px;top:0;line-height:14px;font-family:var(--mono);
+    font-size:9.5px;color:var(--txt-dim)}
   html,body{height:100%}
   body{background:var(--bg);color:var(--txt);font-family:var(--font);
     font-feature-settings:"tnum" 1;-webkit-font-smoothing:antialiased;overflow:hidden}
@@ -309,6 +367,10 @@ _MAREY_HTML = r"""<!doctype html>
     <div class="scroll" id="scroll"><svg id="plot"></svg></div>
     <div class="empty" id="empty" style="display:none">No slots scheduled · Schedule board is empty</div>
   </div>
+  <section class="backlog" id="backlogStrip" style="display:none">
+    <div class="bk-hd"><span>Backlog</span><span class="bk-sub" id="bkSub"></span></div>
+    <div class="bk-rows" id="bkRows"></div>
+  </section>
   <footer>
     <div class="key">
       <span><i style="background:var(--j1)"></i>job color = job_reference_id</span>
@@ -377,9 +439,45 @@ async function fetchSnap() {
   }
 }
 
+// Backlog strip (#21) — independent of the SVG chart geometry. Draws each
+// approved-but-not-yet-Blending press order as an estimated-duration bar.
+// Bars use a relative scale (longest estimate = full track); they are
+// visibility only, not a position on the time axis.
+function renderBacklog(snap) {
+  const strip = document.getElementById('backlogStrip');
+  const rows = document.getElementById('bkRows');
+  const sub = document.getElementById('bkSub');
+  const bk = (snap && snap.backlog) || [];
+  rows.innerHTML = '';
+  if (!bk.length) { strip.style.display = 'none'; return; }
+  strip.style.display = '';
+  const maxHrs = Math.max(1, ...bk.map(e => e.estimated_hours || 0));
+  for (const e of bk) {
+    const row = document.createElement('div'); row.className = 'bk-row';
+    const lbl = document.createElement('div'); lbl.className = 'bk-lbl';
+    const qty = (e.quantity || 0).toLocaleString();
+    lbl.textContent = (e.lane_label || e.job_reference_id) + ' · ' + qty;
+    lbl.title = lbl.textContent;
+    const track = document.createElement('div'); track.className = 'bk-track';
+    const bar = document.createElement('div'); bar.className = 'bk-bar';
+    if (e.estimated_hours) {
+      bar.style.width = Math.max(3, (e.estimated_hours / maxHrs) * 100) + '%';
+      const est = document.createElement('span'); est.className = 'bk-est';
+      est.textContent = '~' + e.estimated_hours + 'h';
+      bar.appendChild(est);
+    } else {
+      bar.style.width = '3px'; bar.title = 'no press rate available';
+    }
+    track.appendChild(bar); row.appendChild(lbl); row.appendChild(track);
+    rows.appendChild(row);
+  }
+  sub.textContent = bk.length + ' order' + (bk.length === 1 ? '' : 's') + ' awaiting Blending';
+}
+
 function render() {
   if (!state.snap) return;
   const snap = state.snap;
+  renderBacklog(snap);
   // Bucket machines by group, preserve snapshot order within
   const byGroup = {press:[], capsule:[], pkg:[]};
   for (const m of snap.machines) byGroup[groupOf(m.process_group)].push(m);

@@ -206,6 +206,9 @@ def test_view_serves_html():
     # Sanity: it embeds the expected JS hook and the JSON endpoint path
     assert "/schedule.json" in r.text
     assert "Production Schedule" in r.text
+    # Backlog lane (#21) is present in the renderer.
+    assert "backlogStrip" in r.text
+    assert "renderBacklog" in r.text
 
 
 def test_view_escapes_user_data_in_popover():
@@ -222,3 +225,85 @@ def test_view_escapes_user_data_in_popover():
     assert "esc(title)" in r.text
     # Machine name also reaches innerHTML (the lane label row) — escaped too.
     assert "esc(m.name)" in r.text
+
+
+# ─── Backlog lane (#21, ADR-0004) ──────────────────────────────────────────
+
+
+def _candidate(job_id: str, qty: int = 100000, n: str | None = None,
+               flavor: str | None = None):
+    from engine.models import ScheduleNewOrder
+    return ScheduleNewOrder(
+        job_reference_id=job_id, recipe_key="tablet-press-standard",
+        recipe_version=1, quantity=qty, include_press=True,
+        n_number=n, flavor=flavor,
+    )
+
+
+def test_schedule_json_includes_backlog_lane():
+    """An ingested pressing order with no slots surfaces in the backlog lane
+    with an estimated duration."""
+    snap = _snap([_machine("M1", "Gandalf", cap=40000)], [])
+    with (
+        patch("engine.routes.view.read_snapshot", new_callable=AsyncMock) as m,
+        patch("engine.routes.view._fetch_blend_enrichment", new_callable=AsyncMock) as fe,
+        patch(
+            "engine.routes.view.list_pressing_backlog_candidates",
+            new_callable=AsyncMock,
+        ) as lc,
+    ):
+        m.return_value = snap
+        fe.return_value = {}
+        lc.return_value = [_candidate("ps-1", qty=100000, n="N1", flavor="Strawberry")]
+        with TestClient(app) as c:
+            r = c.get("/schedule.json")
+    data = r.json()
+    assert len(data["backlog"]) == 1
+    e = data["backlog"][0]
+    assert e["job_reference_id"] == "ps-1"
+    assert e["n_number"] == "N1"
+    assert e["estimated_hours"] == 3  # ceil(100000/40000)
+    assert "N1" in e["lane_label"]
+
+
+def test_schedule_json_backlog_excludes_already_placed():
+    """A candidate that already has a slot is not in the backlog."""
+    snap = _snap(
+        [_machine("M1", "Gandalf", cap=40000)],
+        [_slot("S1", "M1", job_reference_id="ps-1")],
+    )
+    with (
+        patch("engine.routes.view.read_snapshot", new_callable=AsyncMock) as m,
+        patch("engine.routes.view._fetch_blend_enrichment", new_callable=AsyncMock) as fe,
+        patch(
+            "engine.routes.view.list_pressing_backlog_candidates",
+            new_callable=AsyncMock,
+        ) as lc,
+    ):
+        m.return_value = snap
+        fe.return_value = {}
+        lc.return_value = [_candidate("ps-1"), _candidate("ps-2")]
+        with TestClient(app) as c:
+            r = c.get("/schedule.json")
+    data = r.json()
+    assert [e["job_reference_id"] for e in data["backlog"]] == ["ps-2"]
+
+
+def test_schedule_json_backlog_scan_failure_is_graceful():
+    """A PS-board scan failure logs and yields an empty backlog, not a 500."""
+    snap = _snap([_machine("M1", "Gandalf")], [])
+    with (
+        patch("engine.routes.view.read_snapshot", new_callable=AsyncMock) as m,
+        patch("engine.routes.view._fetch_blend_enrichment", new_callable=AsyncMock) as fe,
+        patch(
+            "engine.routes.view.list_pressing_backlog_candidates",
+            new_callable=AsyncMock,
+        ) as lc,
+    ):
+        m.return_value = snap
+        fe.return_value = {}
+        lc.side_effect = RuntimeError("monday 500")
+        with TestClient(app) as c:
+            r = c.get("/schedule.json")
+    assert r.status_code == 200
+    assert r.json()["backlog"] == []

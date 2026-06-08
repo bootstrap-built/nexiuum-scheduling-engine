@@ -12,7 +12,15 @@ from typing import Any
 
 from engine.config import get_settings
 from engine.core.labels import is_n_number
+from engine.core.spec_sheet import (
+    SpecSheetParseError,
+    UnsupportedManufacturingRouteError,
+    UnsupportedProductTypeError,
+    build_schedule_order,
+    parse_spec_sheet_payload,
+)
 from engine.io.monday import nexiuum_client
+from engine.models import ScheduleNewOrder
 
 log = logging.getLogger(__name__)
 
@@ -102,6 +110,49 @@ async def read_ps_item_for_ingest(item_id: str) -> PSItemIngest:
 
     n_number = _extract_n_number(item, s.col_ps_n_number)
     return PSItemIngest(payload_text=payload_text, n_number=n_number)
+
+
+async def list_pressing_backlog_candidates() -> list[ScheduleNewOrder]:
+    """Scan the Production Schedule board for pressing orders the engine could
+    schedule — the candidate set for the derived backlog lane (#21, ADR-0004).
+
+    Returns a `ScheduleNewOrder` for every item that carries a Spec Sheet
+    Payload, parses cleanly, and presses (`include_press=True`), in board order.
+    Items with no payload (the shared board's non-Nexiuum rows), an unsupported
+    product/route, or a malformed payload are skipped quietly — the backlog is a
+    best-effort visibility view, not an authoritative schedule.
+
+    Returns `[]` when the Nexiuum token isn't configured (the engine simply
+    shows no backlog rather than erroring the whole /schedule.json render).
+    """
+    s = get_settings()
+    if not s.nexiuum_monday_token:
+        return []
+
+    async with nexiuum_client() as client:
+        items = await client.fetch_board_items(s.nexiuum_production_schedule_board)
+
+    candidates: list[ScheduleNewOrder] = []
+    for item in items:
+        payload_text = _extract_long_text_value(item, s.col_ps_spec_sheet_payload)
+        if not payload_text or not payload_text.strip():
+            continue
+        try:
+            payload = parse_spec_sheet_payload(payload_text)
+            order = build_schedule_order(
+                payload,
+                job_reference_id=str(item.get("id")),
+                n_number=_extract_n_number(item, s.col_ps_n_number),
+            )
+        except (
+            SpecSheetParseError,
+            UnsupportedManufacturingRouteError,
+            UnsupportedProductTypeError,
+        ):
+            continue
+        if order.include_press:
+            candidates.append(order)
+    return candidates
 
 
 def _extract_n_number(item: dict[str, Any], column_id: str) -> str | None:
