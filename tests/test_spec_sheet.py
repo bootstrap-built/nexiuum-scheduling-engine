@@ -332,6 +332,21 @@ def test_build_schedule_order_propagates_dual_sided():
     assert order.dual_sided is True
 
 
+def test_build_schedule_order_include_press_default_true():
+    """A pressing route (default) carries include_press=True (ADR-0004)."""
+    p = parse_spec_sheet_payload(_payload_json(manufacturing_route="Manufacturing"))
+    order = build_schedule_order(p, job_reference_id="ps-1")
+    assert order.include_press is True
+
+
+def test_build_schedule_order_kitting_only_sets_include_press_false():
+    """Kitting-Only is already-pressed inventory → include_press=False so the
+    scheduler skips the press stage (ADR-0004)."""
+    p = parse_spec_sheet_payload(_payload_json(manufacturing_route="Kitting Only"))
+    order = build_schedule_order(p, job_reference_id="ps-1")
+    assert order.include_press is False
+
+
 def test_build_schedule_order_sets_origin_instance_nexiuum():
     """Phase 2D orders originate on the Nexiuum Production Schedule board, so the
     order's origin_instance is 'nexiuum'. This is what lets the apply layer skip

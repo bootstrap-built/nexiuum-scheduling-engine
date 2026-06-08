@@ -297,7 +297,7 @@ def build_schedule_order(
     Raises `UnsupportedProductTypeError` or `UnsupportedManufacturingRouteError`
     when the payload shouldn't schedule.
     """
-    should_schedule, _include_press, _priority = resolve_route(payload)
+    should_schedule, include_press, _priority = resolve_route(payload)
     if not should_schedule:
         raise UnsupportedManufacturingRouteError(payload.manufacturing_route or "")
 
@@ -316,6 +316,7 @@ def build_schedule_order(
         dual_sided=payload.is_dual,
         active_mg=primary_active_mg(payload),
         packaging_breakdown=breakdown,
+        include_press=include_press,
         n_number=n_number,
         flavor=flavor.flavor,
         # Phase 2D orders originate on the Nexiuum Production Schedule board.

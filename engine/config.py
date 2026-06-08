@@ -245,6 +245,14 @@ class Settings(BaseSettings):
     # Phase 1: single tablet-press-standard recipe with one "press" stage.
     blend_status_pressing_label: str = "Pressing"
     blend_status_pressing_stage_id: str = "press"
+    # ADR-0004 — when Blend Status flips to this label, a pressing order that was
+    # deferred at create_item is released onto the schedule (full press +
+    # packaging chain). This is the press-scheduling trigger.
+    blend_status_blending_label: str = "Blending"
+    # #23 — the Blend Records text column the blend-intake workflow stamps with
+    # the originating Production Schedule item id (`source_item_id`). The engine
+    # resolves Blend Record → PS Order through this on every Blend Records event.
+    col_blend_source_item: str = "text_mm1mjk8n"
     # Phase 2C — when Blend Status flips to this label, the engine writes
     # actual_end + Status=Done on the press slot AND adjusts dependent
     # packaging slots' planned_start via the baton-pass.

@@ -289,6 +289,12 @@ class ScheduleNewOrder:
     # share a machine_class (rare — two clamshell configs) or differ
     # (common — clamshell + sachet split).
     packaging_breakdown: tuple[PackagingSlice, ...] = ()
+    # include_press — whether this order's Process press stage(s) are scheduled.
+    # Derived from the manufacturing route (ADR-0004): Kitting-Only orders are
+    # already-pressed inventory, so the engine skips Pressing-class recipe stages
+    # and schedules only the packaging breakdown. Defaults True so the legacy
+    # Gray Space flow and existing callers keep pressing.
+    include_press: bool = True
     # N# — the originating PO's traceability number, read from the Production
     # Schedule item's "Nexiuum #" board_relation on Phase 2D ingest. None for
     # the legacy Gray Space Blend Records flow. Pass-through label only.
@@ -330,6 +336,24 @@ class ActualEndReported:
     job_reference_id: str
     stage_id: str
     actual_at: datetime
+
+
+@dataclass(frozen=True)
+class BlendingStarted:
+    """Event: a Blend Record flipped to "Blending" (ADR-0004).
+
+    The press-scheduling trigger. A pressing order is deferred at create_item
+    and surfaces only in the backlog lane until the Gray Space floor commits
+    to the blend by flipping Blend Status → "Blending". On this event the
+    engine resolves the Blend Record to its originating Production Schedule
+    item (#23), re-ingests the payload, and places the full press + packaging
+    chain onto the schedule.
+
+    Keyed by `blend_record_id` (the Blend Records pulse id); the worker
+    resolves it to the PS item id via `read_blend_record_ps_item_id`.
+    """
+
+    blend_record_id: str
 
 
 @dataclass(frozen=True)
@@ -380,6 +404,7 @@ Event = (
     | CapacityChanged
     | ActualStartReported
     | ActualEndReported
+    | BlendingStarted
     | ManualReschedule
     | ExpediteRequested
     | DriftDetected

@@ -138,8 +138,8 @@ def test_webhook_blend_records_ignored_non_status_column(client):
     assert resp.json()["kind"] == "blend_records_ignored_column"
 
 
-def test_webhook_blend_records_status_not_pressing_acknowledged(client):
-    """Blend Status changing to anything other than Pressing → ack but no enqueue."""
+def test_webhook_blend_records_status_not_actionable_acknowledged(client):
+    """Blend Status changing to a non-trigger label (e.g. Pending) → ack, no enqueue."""
     payload = {
         "event": {
             "boardId": 18404836849,
@@ -147,12 +147,36 @@ def test_webhook_blend_records_status_not_pressing_acknowledged(client):
             "type": "update_column_value",
             "columnId": "color_mm1mb9cm",
             "userId": "different-user-456",
-            "value": {"label": {"text": "Blending", "index": 2}},
+            "value": {"label": {"text": "Pending", "index": 5}},
         }
     }
     resp = client.post(WEBHOOK_PATH, json=payload)
     assert resp.status_code == 200
     assert resp.json()["kind"] == "blend_records_status_not_actionable"
+
+
+def test_webhook_blend_records_blending_enqueues_blending_started(client):
+    """ADR-0004 — Blend Status → Blending fires a BlendingStarted event keyed by
+    the Blend Record id."""
+    payload = {
+        "event": {
+            "boardId": 18404836849,
+            "pulseId": 11801201557,
+            "type": "update_column_value",
+            "columnId": "color_mm1mb9cm",
+            "userId": "different-user-456",
+            "value": {"label": {"text": "Blending", "index": 0}},
+        }
+    }
+    with patch("engine.routes.webhook.enqueue_event", new_callable=AsyncMock) as mock_enq:
+        resp = client.post(WEBHOOK_PATH, json=payload)
+    assert resp.status_code == 200
+    assert resp.json()["kind"] == "blending_started"
+    mock_enq.assert_awaited_once()
+    enqueued = mock_enq.await_args.args[0]
+    from engine.models import BlendingStarted
+    assert isinstance(enqueued, BlendingStarted)
+    assert enqueued.blend_record_id == "11801201557"
 
 
 def test_webhook_blend_records_pressing_enqueues_actual_start(client):
@@ -164,7 +188,7 @@ def test_webhook_blend_records_pressing_enqueues_actual_start(client):
             "type": "update_column_value",
             "columnId": "color_mm1mb9cm",
             "userId": "different-user-456",
-            "value": {"label": {"text": "Pressing", "index": 5}},
+            "value": {"label": {"text": "Pressing", "index": 3}},
             "changedAt": 1779879000,  # 2026-05-22 ~16:10 UTC
         }
     }
@@ -217,7 +241,7 @@ def test_webhook_blend_records_pressing_falls_back_to_now_without_changed_at(cli
             "type": "update_column_value",
             "columnId": "color_mm1mb9cm",
             "userId": "different-user-456",
-            "value": {"label": {"text": "Pressing", "index": 5}},
+            "value": {"label": {"text": "Pressing", "index": 3}},
             # no changedAt
         }
     }
