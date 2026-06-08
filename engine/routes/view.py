@@ -61,6 +61,7 @@ def _slot_to_dict(s: Slot) -> dict[str, Any]:
         "quantity": s.quantity,
         "n_number": s.n_number,
         "flavor": s.flavor,
+        "dependent_on_ids": list(s.dependent_on_ids),
         "planned_start": _iso(s.planned_start),
         "planned_end": _iso(s.planned_end),
         "actual_start": _iso(s.actual_start),
@@ -86,6 +87,7 @@ def _snapshot_to_dict(snap: Snapshot, enrich: dict[str, dict[str, Any]]) -> dict
         d["job_name"] = meta.get("job_name")
         d["job_client"] = meta.get("job_client")
         d["job_active"] = meta.get("job_active")
+        d["ps_item_id"] = meta.get("ps_item_id")
         # Lane label via the labels module (single source of truth). The
         # Slot's own N# wins; for the legacy Gray Space flow (n_number=None)
         # we fall back to the Blend Records PO Number enrichment (job_label),
@@ -110,7 +112,10 @@ async def _fetch_blend_enrichment(
     """Fetch display-only Blend Records columns for the given job ids.
 
     Returns a dict keyed by Monday item id with `job_label` (PO Number /
-    "N#"), `job_name` (the item's display name), `job_client`, `job_active`.
+    "N#"), `job_name` (the item's display name), `job_client`, `job_active`,
+    and `ps_item_id` (the originating Production Schedule item id the
+    blend-intake workflow stamped in the source-item column, for the pop-out
+    PS link — None for legacy Gray-Space-origin records that carry no link).
     Missing or unset columns become None. Empty input → empty dict (no
     Monday call).
 
@@ -121,7 +126,12 @@ async def _fetch_blend_enrichment(
     if not job_ids:
         return {}
     s = get_settings()
-    col_ids = [s.col_blend_po_number, s.col_blend_client, s.col_blend_active_ingredient]
+    col_ids = [
+        s.col_blend_po_number,
+        s.col_blend_client,
+        s.col_blend_active_ingredient,
+        s.col_blend_source_item,
+    ]
     query = """
     query ($ids: [ID!], $cols: [String!]) {
       items(ids: $ids) {
@@ -138,11 +148,13 @@ async def _fetch_blend_enrichment(
         out: dict[str, dict[str, Any]] = {}
         for item in data.get("items") or []:
             cols = {cv["id"]: (cv.get("text") or None) for cv in item.get("column_values") or []}
+            source_item = (cols.get(s.col_blend_source_item) or "").strip() or None
             out[str(item["id"])] = {
                 "job_label": cols.get(s.col_blend_po_number),
                 "job_name": item.get("name"),
                 "job_client": cols.get(s.col_blend_client),
                 "job_active": cols.get(s.col_blend_active_ingredient),
+                "ps_item_id": source_item,
             }
         return out
 
@@ -195,7 +207,7 @@ _MAREY_HTML = r"""<!doctype html>
     --now:#f0a93c; --drift:#e0653c; --running:#39d98a; --blocked:#c2554a;
     --j1:#e0653c; --j2:#2bb39a; --j3:#8b7be8; --j4:#e0a23c;
     --j5:#3c9be0; --j6:#e058a0; --j7:#7bd0e0; --j8:#a067e0;
-    --lane-h:34px; --hdr-h:28px; --gutter:200px;
+    --lane-h:34px; --hdr-h:28px; --axis-h:28px; --gutter:200px;
     --font:'Archivo',system-ui,sans-serif; --mono:'IBM Plex Mono',ui-monospace,monospace;
   }
   *{box-sizing:border-box;margin:0;padding:0}
@@ -221,9 +233,21 @@ _MAREY_HTML = r"""<!doctype html>
   .seg button+button{border-left:1px solid var(--line)}
   .seg button.on{background:var(--rail);color:var(--txt)}
   .seg button:hover{color:var(--txt)}
-  .body{flex:1 1 auto;display:flex;min-height:0;position:relative}
-  .labels{flex:0 0 var(--gutter);background:var(--panel);border-right:1px solid var(--line);
-    overflow:hidden;padding-top:var(--hdr-h)}
+  /* Frozen-pane grid: a fixed corner + horizontally-scrolling time axis on
+     top; a vertically-scrolling labels gutter + a both-axis-scrolling lane
+     pane below. The lane pane (.scroll) is the master scroller; JS mirrors
+     its scrollLeft to the axis and its scrollTop to the labels gutter so the
+     axis stays pinned vertically and the labels stay pinned horizontally. */
+  .body{flex:1 1 auto;display:flex;flex-direction:column;min-height:0;position:relative}
+  .axisrow{flex:0 0 var(--axis-h);display:flex;min-height:0}
+  .corner{flex:0 0 var(--gutter);background:var(--panel);
+    border-right:1px solid var(--line);border-bottom:1px solid var(--line)}
+  .axisscroll{flex:1 1 auto;overflow:hidden;background:var(--panel);
+    border-bottom:1px solid var(--line)}
+  .lanesrow{flex:1 1 auto;display:flex;min-height:0;position:relative}
+  .labelscroll{flex:0 0 var(--gutter);background:var(--panel);
+    border-right:1px solid var(--line);overflow:hidden}
+  .labels{}
   .grp-l{height:var(--hdr-h);display:flex;align-items:center;padding:0 16px;
     font-size:10.5px;font-weight:600;letter-spacing:.14em;text-transform:uppercase;
     color:var(--txt-faint);border-top:1px solid var(--line)}
@@ -240,13 +264,14 @@ _MAREY_HTML = r"""<!doctype html>
   .lane-l.press::before{background:rgba(60,155,224,.6)}
   .lane-l.capsule::before{background:rgba(160,103,224,.6)}
   .lane-l.pkg::before{background:rgba(43,179,154,.6)}
-  .scroll{flex:1 1 auto;overflow-x:auto;overflow-y:hidden;background:var(--bg)}
+  .scroll{flex:1 1 auto;overflow:auto;background:var(--bg)}
   svg{display:block}
   text{font-family:var(--font)}
   .ax{font-family:var(--mono);font-size:11px;fill:var(--txt-faint)}
   .axd{font-size:11px;fill:var(--txt-dim);font-weight:600;letter-spacing:.04em}
   .seg-bar{cursor:pointer;transition:opacity .18s,filter .18s}
   .seg-bar:hover{filter:brightness(1.2)}
+  .dep-line{fill:none;stroke-width:1.5;opacity:.28;pointer-events:none}
   .drift{stroke:var(--drift);stroke-width:2;stroke-dasharray:5 3}
   .empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
     pointer-events:none;color:var(--txt-faint);font-size:13px;font-family:var(--mono)}
@@ -276,6 +301,13 @@ _MAREY_HTML = r"""<!doctype html>
     padding:2px 0;color:var(--txt-dim)}
   #tip .r b{color:var(--txt);font-weight:500;font-family:var(--mono);text-align:right}
   #tip .sep{height:1px;background:var(--line);margin:7px -3px}
+  #tip .links{display:flex;flex-direction:column;gap:5px;margin-top:8px}
+  #tip .lnk{display:flex;align-items:center;gap:7px;font-size:11.5px;
+    font-family:var(--mono);color:var(--press);text-decoration:none;padding:3px 0}
+  #tip .lnk:hover{text-decoration:underline}
+  #tip .lnk svg{width:12px;height:12px;flex:0 0 auto;stroke:currentColor;
+    stroke-width:1.6;fill:none}
+  #tip .lnk .lbl{color:var(--txt-dim)}
   #tip .tag{font-size:10px;font-family:var(--mono);padding:2px 7px;border-radius:4px;
     letter-spacing:.04em;display:inline-block}
   .tag.queued{background:var(--rail);color:var(--txt-dim)}
@@ -305,9 +337,15 @@ _MAREY_HTML = r"""<!doctype html>
     </div>
   </header>
   <div class="body">
-    <div class="labels" id="labels"></div>
-    <div class="scroll" id="scroll"><svg id="plot"></svg></div>
-    <div class="empty" id="empty" style="display:none">No slots scheduled · Schedule board is empty</div>
+    <div class="axisrow">
+      <div class="corner"></div>
+      <div class="axisscroll" id="axisscroll"><svg id="axis"></svg></div>
+    </div>
+    <div class="lanesrow">
+      <div class="labelscroll" id="labelscroll"><div class="labels" id="labels"></div></div>
+      <div class="scroll" id="scroll"><svg id="plot"></svg></div>
+      <div class="empty" id="empty" style="display:none">No slots scheduled · Schedule board is empty</div>
+    </div>
   </div>
   <footer>
     <div class="key">
@@ -333,10 +371,23 @@ _MAREY_HTML = r"""<!doctype html>
 
 const JOB_COLORS = ['var(--j1)','var(--j2)','var(--j3)','var(--j4)','var(--j5)','var(--j6)','var(--j7)','var(--j8)'];
 
+// Monday deep-links for the slot pop-out (#31). The slot's job_reference_id is
+// the Blend Record item id (Gray Space account); ps_item_id is the originating
+// Production Schedule item id (Nexiuum account), present only when the blend
+// was created from a spec-form order — legacy Gray-Space-origin blends have
+// none, so we surface the Blend Record link always and the PS link when known.
+// The Deal/PO link is deferred (needs the PS↔deal relation — see #23/#31).
+const MONDAY_BLEND_RECORDS_BOARD = 18404836849;
+const MONDAY_PRODUCTION_SCHEDULE_BOARD = 8196668916;
+const blendRecordUrl = id => `https://gray-space-force.monday.com/boards/${MONDAY_BLEND_RECORDS_BOARD}/pulses/${encodeURIComponent(id)}`;
+const psItemUrl = id => `https://nexiuum.monday.com/boards/${MONDAY_PRODUCTION_SCHEDULE_BOARD}/pulses/${encodeURIComponent(id)}`;
+const LINK_ICON = '<svg viewBox="0 0 24 24"><path d="M14 4h6v6"/><path d="M20 4l-9 9"/><path d="M19 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h5"/></svg>';
+
 let state = {
   snap: null,
   zoomHours: 24,
   pinnedSlotId: null,  // if set, the popout stays open across re-renders
+  didInitScroll: false,  // open scrolled to "now" once, then leave the user's pan alone (#27)
 };
 
 // — grouping —
@@ -416,29 +467,47 @@ function render() {
   // squeezed to fit on screen. See #11.
   const now = new Date(snap.read_at || Date.now());
   const windowSpan = state.zoomHours * 3600 * 1000;
-  const t0 = now.getTime() - windowSpan * 0.15;  // a little history on the left
+
+  // Left edge of the domain. Open with a little history, but extend further
+  // left to reach slots already in the past so the operator can scroll back —
+  // bounded to a 7-day look-back so the domain (and the SVG width) can't run
+  // away on very old data. The view opens scrolled to "now" (see initial
+  // scrollLeft below); the past sits to the left, the future to the right. #27.
+  const LOOKBACK_MS = 7 * 24 * 3600 * 1000;
+  const lookbackFloor = now.getTime() - LOOKBACK_MS;
+  let earliest = now.getTime() - windowSpan * 0.15;
+  for (const s of snap.slots) {
+    const st = s.actual_start ? parseISO(s.actual_start) : parseISO(s.planned_start);
+    if (st && st.getTime() < earliest) earliest = st.getTime();
+  }
+  const t0 = Math.max(lookbackFloor, earliest);
 
   // Extend the domain end to the latest slot end if it runs past the default
-  // window, with a little future padding so the last bar isn't flush to the edge.
-  let dataEnd = t0 + windowSpan;
+  // window, with a little future padding so the last bar isn't flush to the
+  // edge. Floor the default end at now + a sliver so "now" is always in domain
+  // even when every slot is in the past.
+  let dataEnd = Math.max(t0 + windowSpan, now.getTime() + windowSpan * 0.15);
   let extendsBeyondWindow = false;
   for (const s of snap.slots) {
     const e = s.actual_end ? parseISO(s.actual_end) : parseISO(s.planned_end);
     if (e && e.getTime() > dataEnd) { dataEnd = e.getTime(); extendsBeyondWindow = true; }
   }
-  const t1 = extendsBeyondWindow ? dataEnd + windowSpan * 0.1 : t0 + windowSpan;
+  const t1 = extendsBeyondWindow ? dataEnd + windowSpan * 0.1 : dataEnd;
 
-  // Geometry — keep in sync with the labels-gutter CSS:
-  //   .labels  padding-top: 28px            (= topAxisH — reserved for the time-axis strip)
-  //   .grp-l   height:      28px            (= hdrH    — "PRESS" / "CAPSULE" / "PACKAGING" band)
-  //   .lane-l  height:      34px            (= laneH   — one machine row)
-  // If you change any of these constants, change the matching CSS var (--hdr-h / --lane-h)
-  // or the labels will drift out of alignment with the SVG lanes.
-  const laneH = 34, hdrH = 28, topAxisH = 28;
+  // Geometry — these constants mirror the gutter CSS so the SVG lanes line up
+  // with the HTML labels row-for-row:
+  //   .grp-l   height: 28px  (= hdrH  — "PRESS" / "CAPSULE" / "PACKAGING" band)
+  //   .lane-l  height: 34px  (= laneH — one machine row)
+  //   .axisrow height: 28px  (= axisH — the time-axis strip, its own frozen row)
+  // If you change any of these, change the matching CSS var (--hdr-h / --lane-h
+  // / --axis-h) or the labels will drift out of alignment with the SVG lanes.
+  // The lane SVG starts at y=0; the time axis lives in a separate frozen SVG
+  // above it, so lane y-coords no longer reserve a top strip. #27.
+  const laneH = 34, hdrH = 28, axisH = 28;
   const rowsByGroup = GROUP_ORDER.map(g => byGroup[g].length).filter(n => n > 0);
   const totalRows = rowsByGroup.reduce((a,b) => a + b, 0);
   const groupCount = rowsByGroup.length;
-  const innerH = topAxisH + totalRows * laneH + groupCount * hdrH;
+  const innerH = totalRows * laneH + groupCount * hdrH;
   const scroll = document.getElementById('scroll');
   const padL = 16, padR = 16;
 
@@ -458,7 +527,7 @@ function render() {
   function laneY(machineId) {
     const li = laneIndex.get(machineId);
     if (li == null) return null;
-    let y = topAxisH, seenRows = 0;
+    let y = 0, seenRows = 0;
     for (const g of GROUP_ORDER) {
       const n = byGroup[g].length;
       if (n === 0) continue;
@@ -472,21 +541,22 @@ function render() {
     return null;
   }
 
+  const ns = 'http://www.w3.org/2000/svg';
   const svg = document.getElementById('plot');
   svg.setAttribute('width', innerW);
   svg.setAttribute('height', innerH);
   svg.innerHTML = '';
-  const ns = 'http://www.w3.org/2000/svg';
 
-  // Top-axis strip (matches the labels gutter's padding-top)
-  const axisBg = document.createElementNS(ns, 'rect');
-  axisBg.setAttribute('x', 0); axisBg.setAttribute('y', 0);
-  axisBg.setAttribute('width', innerW); axisBg.setAttribute('height', topAxisH);
-  axisBg.setAttribute('fill', 'var(--panel)');
-  svg.appendChild(axisBg);
+  // The time axis is a separate frozen SVG (same width and x-domain as the
+  // plot) so it stays pinned when the lane pane scrolls vertically. Its panel
+  // background comes from the .axisscroll container. #27.
+  const axisSvg = document.getElementById('axis');
+  axisSvg.setAttribute('width', innerW);
+  axisSvg.setAttribute('height', axisH);
+  axisSvg.innerHTML = '';
 
-  // Group separator bands (one per process group, sits just below the time axis)
-  let y = topAxisH;
+  // Group separator bands (one per process group)
+  let y = 0;
   for (const g of GROUP_ORDER) {
     const n = byGroup[g].length;
     if (n === 0) continue;
@@ -510,11 +580,11 @@ function render() {
   let tt = Math.ceil(t0 / tickStep) * tickStep;
   while (tt < t1) {
     const xx = x(tt);
-    // Grid lines start below the time-axis strip so they don't render through
-    // the tick labels.
+    // Grid lines span the full lane height in the plot SVG; the tick label
+    // goes in the frozen axis SVG above so it stays pinned on vertical scroll.
     const line = document.createElementNS(ns, 'line');
     line.setAttribute('x1', xx); line.setAttribute('x2', xx);
-    line.setAttribute('y1', topAxisH); line.setAttribute('y2', innerH);
+    line.setAttribute('y1', 0); line.setAttribute('y2', innerH);
     line.setAttribute('stroke', 'var(--grid)');
     svg.appendChild(line);
     const d = new Date(tt);
@@ -526,20 +596,32 @@ function render() {
       ? d.toLocaleDateString('en-US', {weekday:'short', month:'short', day:'numeric'})
       : d.toLocaleTimeString('en-US', {hour:'numeric', minute:'2-digit'});
     if (isMidnight) lbl.setAttribute('class', 'axd');
-    svg.appendChild(lbl);
+    axisSvg.appendChild(lbl);
     tt += tickStep;
   }
 
-  // Now line — runs through the lane area only, not the time-axis strip.
+  // Now line — spans the full lane height, plus a matching tick in the axis.
   const nowX = x(Date.now());
   if (nowX >= padL && nowX <= innerW - padR) {
     const nl = document.createElementNS(ns, 'line');
     nl.setAttribute('x1', nowX); nl.setAttribute('x2', nowX);
-    nl.setAttribute('y1', topAxisH); nl.setAttribute('y2', innerH);
+    nl.setAttribute('y1', 0); nl.setAttribute('y2', innerH);
     nl.setAttribute('stroke', 'var(--now)');
     nl.setAttribute('stroke-width', 2);
     svg.appendChild(nl);
+    const nlA = document.createElementNS(ns, 'line');
+    nlA.setAttribute('x1', nowX); nlA.setAttribute('x2', nowX);
+    nlA.setAttribute('y1', 0); nlA.setAttribute('y2', axisH);
+    nlA.setAttribute('stroke', 'var(--now)');
+    nlA.setAttribute('stroke-width', 2);
+    axisSvg.appendChild(nlA);
   }
+
+  // Dependency-line layer — inserted before the bars so the lines paint
+  // beneath them; populated after the bar loop computes slot geometry. #29.
+  const depLayer = document.createElementNS(ns, 'g');
+  svg.appendChild(depLayer);
+  const slotGeom = new Map();  // slot id -> {x0, x1, y} for drawn slots
 
   // Slot bars
   let drewSlot = false;
@@ -556,6 +638,7 @@ function render() {
     const bx1 = Math.min(innerW - padR, x(teMs));
     const w = Math.max(2, bx1 - bx0);
     drewSlot = true;
+    slotGeom.set(s.id, {x0: bx0, x1: bx1, y: ly});  // for dependency lines (#29)
     const color = hashColor(s.job_reference_id || s.id);
 
     const g = document.createElementNS(ns, 'g');
@@ -612,6 +695,28 @@ function render() {
     svg.appendChild(g);
   }
 
+  // Dependency lines — for each slot, draw a curve from every predecessor's
+  // right edge to this (dependent) slot's left edge. dependent_on_ids holds the
+  // slot's upstream predecessors; only slots actually drawn this frame have
+  // geometry, so edges to clipped/off-screen slots are silently skipped.
+  // Colored by the downstream job so a job's lines match its bars. #29.
+  for (const s of snap.slots) {
+    const cur = slotGeom.get(s.id);
+    if (!cur || !s.dependent_on_ids) continue;
+    const color = hashColor(s.job_reference_id || s.id);
+    for (const depId of s.dependent_on_ids) {
+      const pred = slotGeom.get(depId);
+      if (!pred) continue;
+      const x0 = pred.x1, y0 = pred.y, x1 = cur.x0, y1 = cur.y;
+      const cx = (x0 + x1) / 2;
+      const path = document.createElementNS(ns, 'path');
+      path.setAttribute('d', `M ${x0} ${y0} C ${cx} ${y0} ${cx} ${y1} ${x1} ${y1}`);
+      path.setAttribute('class', 'dep-line');
+      path.setAttribute('stroke', color);
+      depLayer.appendChild(path);
+    }
+  }
+
   // If a popout was pinned before this re-render (e.g., 30s poll fired),
   // re-attach it to the same slot in the new snapshot so it doesn't vanish.
   if (state.pinnedSlotId) {
@@ -631,6 +736,27 @@ function render() {
   const m = document.getElementById('meta');
   const sc = snap.slots.length, mc = snap.machines.length;
   m.textContent = `${mc} machines · ${sc} slot${sc === 1 ? '' : 's'} · snapshot ${snap.read_at ? new Date(snap.read_at).toLocaleString('en-US',{hour:'numeric',minute:'2-digit',second:'2-digit'}) : '—'}`;
+
+  // Open scrolled to "now" on first paint (and after a zoom change, which
+  // resets the flag) so present+future are in view and the past sits to the
+  // left. After that, leave the operator's pan position alone across the 30s
+  // polls. Then mirror the lane pane's scroll onto the frozen axis/labels. #27
+  if (!state.didInitScroll) {
+    scroll.scrollLeft = Math.max(0, x(now.getTime()) - scroll.clientWidth * 0.15);
+    state.didInitScroll = true;
+  }
+  syncPanes();
+}
+
+// Mirror the master (lane) pane's scroll onto the frozen panes: axis tracks
+// horizontal, labels gutter tracks vertical. Keeps the time axis pinned on
+// vertical scroll and the machine labels pinned on horizontal scroll. #27
+function syncPanes() {
+  const scroll = document.getElementById('scroll');
+  const ax = document.getElementById('axisscroll');
+  const lab = document.getElementById('labelscroll');
+  if (ax) ax.scrollLeft = scroll.scrollLeft;
+  if (lab) lab.scrollTop = scroll.scrollTop;
 }
 
 // Escape user-data before it goes into innerHTML. Flavor (and the N#
@@ -660,6 +786,18 @@ function renderTip(s, color, keepPosition) {
   if (s.job_name) subParts.push(s.job_name);
   if (s.job_client && (!s.job_name || !s.job_name.includes(s.job_client))) subParts.push(s.job_client);
   const subline = subParts.length ? `<div class="sub">${subParts.map(esc).join(' · ')}</div>` : '';
+  // Source-record links (#31). Blend Record link is always available (the slot
+  // is keyed by its id); the PS-item link only when the blend carries a
+  // source-item correlation. Links are clickable only when the pop-out is
+  // pinned (hover state is pointer-events:none).
+  const linkRows = [];
+  if (s.ps_item_id) {
+    linkRows.push(`<a class="lnk" href="${psItemUrl(s.ps_item_id)}" target="_blank" rel="noopener">${LINK_ICON}<span class="lbl">Production Schedule item</span></a>`);
+  }
+  if (s.job_reference_id) {
+    linkRows.push(`<a class="lnk" href="${blendRecordUrl(s.job_reference_id)}" target="_blank" rel="noopener">${LINK_ICON}<span class="lbl">Blend Record</span></a>`);
+  }
+  const linksHtml = linkRows.length ? `<div class="sep"></div><div class="links">${linkRows.join('')}</div>` : '';
   tip.innerHTML = `
     <button class="close" aria-label="Close" title="Close (esc)">&times;</button>
     <h4><span class="sw" style="background:${color}"></span><span class="ttl">${esc(title)}</span>
@@ -678,6 +816,7 @@ function renderTip(s, color, keepPosition) {
     <div class="sep"></div>
     <div class="r"><span>pulse id</span><b>${s.job_reference_id || '—'}</b></div>
     <div class="r"><span>slot id</span><b>${s.id}</b></div>
+    ${linksHtml}
   `;
   tip.style.opacity = 1;
   // Wire up the close button each render — innerHTML rewrote the node.
@@ -736,12 +875,13 @@ document.querySelectorAll('#zoom button').forEach(b => {
     document.querySelectorAll('#zoom button').forEach(x => x.classList.remove('on'));
     b.classList.add('on');
     state.zoomHours = parseInt(b.dataset.z, 10);
+    state.didInitScroll = false;  // re-center on "now" at the new density (#27)
     render();
   });
 });
 
-// Sync vertical scroll between labels gutter and SVG scroll area (none needed —
-// labels gutter doesn't scroll horizontally; vertical overflow not used yet).
+// Mirror lane-pane scroll onto the frozen axis + labels gutter (#27).
+document.getElementById('scroll').addEventListener('scroll', syncPanes);
 
 window.addEventListener('resize', render);
 

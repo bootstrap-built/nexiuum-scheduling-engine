@@ -38,6 +38,7 @@ def _machine(id: str, name: str, group: str = "Pressing", cap: float = 40000.0,
 def _slot(id: str, machine_id: str, status: SlotStatus = SlotStatus.QUEUED,
           drift: datetime | None = None, n_number: str | None = None,
           flavor: str | None = None,
+          dependent_on_ids: tuple[str, ...] = (),
           job_reference_id: str = "11801201557") -> Slot:
     return Slot(
         id=id, name=f"slot {id}", job_reference_id=job_reference_id,
@@ -45,7 +46,7 @@ def _slot(id: str, machine_id: str, status: SlotStatus = SlotStatus.QUEUED,
         recipe_key="tablet-press-standard", recipe_version=1, quantity=50000,
         planned_start=NOW, planned_end=NOW,
         actual_start=None, actual_end=None,
-        dependent_on_ids=(), status=status, manually_placed=False,
+        dependent_on_ids=dependent_on_ids, status=status, manually_placed=False,
         priority=Priority.NORMAL, last_reflow_hash=None,
         drift_last_detected_at=drift, n_number=n_number, flavor=flavor,
     )
@@ -222,3 +223,99 @@ def test_view_escapes_user_data_in_popover():
     assert "esc(title)" in r.text
     # Machine name also reaches innerHTML (the lane label row) — escaped too.
     assert "esc(m.name)" in r.text
+
+
+def test_schedule_json_serializes_dependent_on_ids():
+    """Each slot exposes dependent_on_ids so the view can draw dependency
+    lines (#29). Empty tuple → empty list; populated tuple round-trips."""
+    snap = _snap(
+        [_machine("M1", "Gandalf")],
+        [
+            _slot("S1", "M1"),                                   # no deps
+            _slot("S2", "M1", dependent_on_ids=("S1", "S0")),    # two predecessors
+        ],
+    )
+    with patch("engine.routes.view.read_snapshot", new_callable=AsyncMock) as m, \
+         patch("engine.routes.view._fetch_blend_enrichment", new_callable=AsyncMock) as fe:
+        m.return_value = snap
+        fe.return_value = {}
+        with TestClient(app) as c:
+            r = c.get("/schedule.json")
+    by_id = {s["id"]: s for s in r.json()["slots"]}
+    assert by_id["S1"]["dependent_on_ids"] == []
+    assert by_id["S2"]["dependent_on_ids"] == ["S1", "S0"]
+
+
+def test_schedule_json_surfaces_ps_item_id_for_popout_link():
+    """ps_item_id from the Blend Record's source-item column rides onto each
+    slot for the pop-out PS link (#31). Legacy blends with no correlation get
+    null and fall back to the Blend Record link only."""
+    snap = _snap(
+        [_machine("M1", "Gandalf")],
+        [
+            _slot("S1", "M1", job_reference_id="11801201557"),  # correlated
+            _slot("S2", "M1", job_reference_id="99999"),        # legacy / no link
+        ],
+    )
+    enrich = {
+        "11801201557": {
+            "job_label": "N3236", "job_name": "N3236 - ROAR LLC",
+            "job_client": "ROAR LLC", "job_active": "7OH 85mg",
+            "ps_item_id": "8800112233",
+        },
+        "99999": {
+            "job_label": None, "job_name": "legacy blend",
+            "job_client": None, "job_active": None, "ps_item_id": None,
+        },
+    }
+    with patch("engine.routes.view.read_snapshot", new_callable=AsyncMock) as m, \
+         patch("engine.routes.view._fetch_blend_enrichment", new_callable=AsyncMock) as fe:
+        m.return_value = snap
+        fe.return_value = enrich
+        with TestClient(app) as c:
+            r = c.get("/schedule.json")
+    by_id = {s["id"]: s for s in r.json()["slots"]}
+    assert by_id["S1"]["ps_item_id"] == "8800112233"
+    assert by_id["S2"]["ps_item_id"] is None
+
+
+def test_fetch_blend_enrichment_queries_source_item_column():
+    """The enrichment read includes the source-item column and maps it to
+    ps_item_id, stripping blanks to None (#31)."""
+    from engine.config import get_settings
+    from engine.routes.view import _fetch_blend_enrichment
+
+    s = get_settings()
+    captured = {}
+
+    class _FakeClient:
+        async def query(self, query, variables=None):
+            captured["query"] = query
+            captured["variables"] = variables
+            return {
+                "items": [
+                    {
+                        "id": "11801201557",
+                        "name": "N3236 - ROAR LLC",
+                        "column_values": [
+                            {"id": s.col_blend_po_number, "text": "N3236"},
+                            {"id": s.col_blend_source_item, "text": "8800112233"},
+                        ],
+                    },
+                    {
+                        "id": "99999",
+                        "name": "legacy",
+                        "column_values": [
+                            {"id": s.col_blend_source_item, "text": "   "},
+                        ],
+                    },
+                ]
+            }
+
+    import asyncio
+    out = asyncio.run(
+        _fetch_blend_enrichment({"11801201557", "99999"}, client=_FakeClient())
+    )
+    assert s.col_blend_source_item in captured["variables"]["cols"]
+    assert out["11801201557"]["ps_item_id"] == "8800112233"
+    assert out["99999"]["ps_item_id"] is None  # blank stripped to None
