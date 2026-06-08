@@ -134,3 +134,37 @@ def _window_end_for_day(t: datetime, machine: Machine) -> datetime:
             hour=0, minute=0, second=0, microsecond=0
         )
     return t.replace(hour=end_hour, minute=0, second=0, microsecond=0)
+
+
+def add_working_hours(t: datetime, hours: float, machine: Machine) -> datetime:
+    """Advance `t` by `hours` of the machine's *working* time.
+
+    Closed (out-of-window) hours don't count. If the machine works 08:00-16:00
+    and `t` is 15:00 with hours=4, the result is 11:00 the next working day
+    (1h consumed today + 3h tomorrow). A 24-hour machine has no closed time, so
+    this is simply `t + hours`. If `t` falls outside the window, counting
+    begins at the next window open.
+
+    Used for the planned press→packaging buffer (#28) — the pressed product
+    rests for a fixed span of working hours before packaging may begin.
+    """
+    if hours <= 0:
+        return t
+    # 24-hour machine: no closed time to skip — plain wall-clock advance.
+    if machine.working_window_start == 0 and machine.working_window_end >= 24:
+        return t + timedelta(hours=hours)
+
+    remaining = timedelta(hours=hours)
+    cursor = _advance_to_working_window(t, machine)
+    for _ in range(366):  # hard cap = one year; real buffers span 1-2 windows
+        window_end = _window_end_for_day(cursor, machine)
+        available = window_end - cursor
+        if remaining <= available:
+            return cursor + remaining
+        remaining -= available
+        cursor = (cursor + timedelta(days=1)).replace(
+            hour=machine.working_window_start, minute=0, second=0, microsecond=0
+        )
+    raise RuntimeError(
+        f"add_working_hours loop exhausted for machine={machine.name} hours={hours}"
+    )
