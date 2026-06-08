@@ -51,6 +51,7 @@ from engine.io.worker import WorkerNotRunning, enqueue_event
 from engine.models import (
     ActualEndReported,
     ActualStartReported,
+    BlendingStarted,
     CapacityChanged,
     SpecSheetItemReady,
 )
@@ -140,6 +141,17 @@ async def webhook_monday(secret: str, request: Request) -> dict[str, Any]:
         # Use Monday's changedAt if available (more accurate than webhook
         # receipt time); fall back to now() in factory tz.
         actual_at = _resolve_actual_at(event, s.factory_tz)
+
+        if new_label == s.blend_status_blending_label:
+            # ADR-0004 — the press-scheduling trigger. A pressing order deferred
+            # at create_item is released onto the schedule now. Keyed by the
+            # Blend Record id; the worker resolves it to the PS item (#23).
+            try:
+                await enqueue_event(BlendingStarted(blend_record_id=pulse_id))
+            except WorkerNotRunning:
+                log.error("worker not running; dropping BlendingStarted for blend=%s", pulse_id)
+                return {"status": "dropped", "kind": "worker_unavailable"}
+            return {"status": "enqueued", "kind": "blending_started"}
 
         if new_label == s.blend_status_pressing_label:
             try:

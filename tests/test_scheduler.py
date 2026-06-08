@@ -399,3 +399,58 @@ def test_dag_respects_predecessor_end_times():
     assert by_stage["lotcode"].planned_start >= press_end
     # clamshell starts at or after the LATER of blister/lotcode (the merge)
     assert clamshell_start >= max(blister_end, lotcode_end)
+
+
+# ─── include_press gating (ADR-0004) ──────────────────────────────────────
+
+
+def _press_and_clamshell_machines() -> list[Machine]:
+    return [
+        _machine("Gandalf", process_group="Pressing", capacity=40000),
+        _machine("Clam1", process_group="Clamshell", capacity=3200),
+    ]
+
+
+def test_include_press_true_default_schedules_press():
+    """Default include_press=True keeps the recipe's press stage."""
+    from engine.models import PackagingSlice
+
+    order = _order(
+        quantity=100000,
+        packaging_breakdown=(PackagingSlice("Clamshell", 100000, 10, ""),),
+    )
+    snap = _snap(_press_and_clamshell_machines(), [_recipe_press_only()])
+    plan = plan_for_new_order(snap, order, now=NOW)
+    stage_ids = {w.stage_id for w in plan.slot_writes}
+    assert "press" in stage_ids
+    assert any(w.machine_id == "Gandalf" for w in plan.slot_writes)
+
+
+def test_include_press_false_drops_press_keeps_packaging():
+    """Kitting-only (include_press=False): press stage skipped, packaging
+    stays — and the packaging stage no longer waits on the dropped press, so
+    it starts immediately."""
+    from engine.models import PackagingSlice
+
+    order = _order(
+        quantity=100000,
+        include_press=False,
+        packaging_breakdown=(PackagingSlice("Clamshell", 100000, 10, ""),),
+    )
+    snap = _snap(_press_and_clamshell_machines(), [_recipe_press_only()])
+    plan = plan_for_new_order(snap, order, now=NOW)
+    stage_ids = {w.stage_id for w in plan.slot_writes}
+    assert "press" not in stage_ids
+    assert not any(w.machine_id == "Gandalf" for w in plan.slot_writes)
+    # exactly the one packaging slot, starting now (no press dependency left)
+    pkg = [w for w in plan.slot_writes if w.machine_id == "Clam1"]
+    assert len(pkg) == 1
+    assert pkg[0].planned_start == NOW
+
+
+def test_include_press_false_no_breakdown_yields_empty_plan():
+    """Already-pressed order with nothing to package → no slots to write."""
+    order = _order(quantity=100000, include_press=False)
+    snap = _snap([_machine("Gandalf", process_group="Pressing")], [_recipe_press_only()])
+    plan = plan_for_new_order(snap, order, now=NOW)
+    assert plan.slot_writes == ()

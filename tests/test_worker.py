@@ -380,8 +380,9 @@ async def test_stop_worker_drains_pending_submissions():
 
 
 @pytest.mark.asyncio
-async def test_process_event_spec_sheet_item_ready_schedules():
-    """SpecSheetItemReady → reads payload → builds order → applies plan."""
+async def test_process_event_spec_sheet_manufacturing_deferred_to_blending():
+    """ADR-0004 — a pressing (Manufacturing) order is NOT placed at create_item.
+    It defers to Blending and surfaces in the backlog lane: no apply, None."""
     import json as _json
     from engine.models import SpecSheetItemReady
 
@@ -397,7 +398,6 @@ async def test_process_event_spec_sheet_item_ready_schedules():
         ],
         "flavor_index": 0,
     }
-    fake_result = ApplyResult(created_slot_ids=["new-1"], reflow_hash="h")
 
     with (
         patch("engine.io.worker.read_snapshot", new_callable=AsyncMock) as mock_snap,
@@ -409,6 +409,82 @@ async def test_process_event_spec_sheet_item_ready_schedules():
         ) as mock_read,
     ):
         mock_snap.return_value = _fake_snapshot()
+        mock_read.return_value = PSItemIngest(
+            payload_text=_json.dumps(payload), n_number="N777"
+        )
+
+        result = await process_event(SpecSheetItemReady(item_id="ps-42"))
+
+    assert result is None
+    mock_read.assert_awaited_once_with("ps-42")
+    mock_apply.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_process_event_spec_sheet_kitting_only_schedules_now():
+    """ADR-0004 — a Kitting-Only order is already-pressed inventory: it schedules
+    immediately at create_item, with the press stage skipped (only packaging)."""
+    import json as _json
+    from engine.models import (
+        Machine,
+        MachineStatus,
+        Recipe,
+        RecipeStage,
+        RecipeStatus,
+        SpecSheetItemReady,
+        Snapshot,
+    )
+
+    payload = {
+        "product_type": "Tablets",
+        "tablet_size": "12mm Bisect",
+        "is_dual": False,
+        "manufacturing_route": "Kitting Only",
+        "actives": [{"name": "Caffeine", "mg": 200}],
+        "packaging_type": "Clamshell",
+        "flavors": [
+            {
+                "flavor": "Strawberry",
+                "qty": 80_000,
+                "packaging_breakdown": [
+                    {"packaging_type": "Clamshell", "qty": 80_000, "items_per_container": 10}
+                ],
+            }
+        ],
+        "flavor_index": 0,
+    }
+    press = Machine(
+        id="press-1", name="Gandalf", process_group="Pressing",
+        status=MachineStatus.ONLINE, capacity_per_hour=40000, hours_per_day=16,
+        working_window_start=6, working_window_end=22, changeover_minutes=30,
+        dual_sided_only=False, max_job_size=None, force_route_condition=None,
+        last_job_ended_at=None,
+    )
+    clam = Machine(
+        id="clam-1", name="Clam", process_group="Clamshell",
+        status=MachineStatus.ONLINE, capacity_per_hour=3200, hours_per_day=16,
+        working_window_start=6, working_window_end=22, changeover_minutes=30,
+        dual_sided_only=False, max_job_size=None, force_route_condition=None,
+        last_job_ended_at=None,
+    )
+    recipe = Recipe(
+        id="R1", name="r v1", recipe_key="tablet-press-standard", version=1,
+        status=RecipeStatus.ACTIVE,
+        stages=(RecipeStage(id="press", machine_class="Pressing", depends_on=()),),
+    )
+    snap = Snapshot(read_at=NOW, machines=(press, clam), recipes=(recipe,), slots=())
+    fake_result = ApplyResult(created_slot_ids=["new-1"], reflow_hash="h")
+
+    with (
+        patch("engine.io.worker.read_snapshot", new_callable=AsyncMock) as mock_snap,
+        patch("engine.io.worker.apply_plan", new_callable=AsyncMock) as mock_apply,
+        patch("engine.io.worker.now_local", return_value=NOW),
+        patch(
+            "engine.io.worker.read_ps_item_for_ingest",
+            new_callable=AsyncMock,
+        ) as mock_read,
+    ):
+        mock_snap.return_value = snap
         mock_apply.return_value = fake_result
         mock_read.return_value = PSItemIngest(
             payload_text=_json.dumps(payload), n_number="N777"
@@ -417,11 +493,11 @@ async def test_process_event_spec_sheet_item_ready_schedules():
         result = await process_event(SpecSheetItemReady(item_id="ps-42"))
 
     assert result is fake_result
-    mock_read.assert_awaited_once_with("ps-42")
     mock_apply.assert_awaited_once()
-    # N# from the reader propagates onto every emitted SlotWrite.
     applied_plan = mock_apply.call_args.args[0]
+    # Press stage skipped — every emitted slot is the Clamshell packaging stage.
     assert applied_plan.slot_writes
+    assert all(w.machine_id == "clam-1" for w in applied_plan.slot_writes)
     assert all(w.n_number == "N777" for w in applied_plan.slot_writes)
 
 
@@ -531,3 +607,111 @@ async def test_process_event_spec_sheet_payload_absent_skips_quietly(caplog):
         for r in caplog.records
     )
     assert not any(r.levelno >= logging.ERROR for r in caplog.records)
+
+
+# ─── ADR-0004 — BlendingStarted (press-scheduling trigger) ─────────────────
+
+
+@pytest.mark.asyncio
+async def test_process_event_blending_started_schedules():
+    """BlendingStarted → resolve Blend Record to PS item (#23) → ingest →
+    place the press chain. This is the moment a deferred pressing order lands."""
+    import json as _json
+    from engine.models import BlendingStarted
+
+    payload = {
+        "product_type": "Tablets",
+        "tablet_size": "12mm Bisect",
+        "is_dual": False,
+        "manufacturing_route": "Manufacturing",
+        "actives": [{"name": "Caffeine", "mg": 200}],
+        "packaging_type": "Blister",
+        "flavors": [{"flavor": "Strawberry", "qty": 80_000, "packaging_breakdown": []}],
+        "flavor_index": 0,
+    }
+    fake_result = ApplyResult(created_slot_ids=["new-1"], reflow_hash="h")
+
+    with (
+        patch("engine.io.worker.read_snapshot", new_callable=AsyncMock) as mock_snap,
+        patch("engine.io.worker.apply_plan", new_callable=AsyncMock) as mock_apply,
+        patch("engine.io.worker.now_local", return_value=NOW),
+        patch(
+            "engine.io.worker.read_blend_record_ps_item_id",
+            new_callable=AsyncMock,
+        ) as mock_corr,
+        patch(
+            "engine.io.worker.read_ps_item_for_ingest",
+            new_callable=AsyncMock,
+        ) as mock_read,
+    ):
+        mock_snap.return_value = _fake_snapshot()
+        mock_apply.return_value = fake_result
+        mock_corr.return_value = "ps-99"
+        mock_read.return_value = PSItemIngest(
+            payload_text=_json.dumps(payload), n_number="N777"
+        )
+
+        result = await process_event(BlendingStarted(blend_record_id="blend-7"))
+
+    assert result is fake_result
+    mock_corr.assert_awaited_once_with("blend-7")
+    # Ingest keyed by the resolved PS item id, not the Blend Record id.
+    mock_read.assert_awaited_once_with("ps-99")
+    mock_apply.assert_awaited_once()
+    applied_plan = mock_apply.call_args.args[0]
+    assert applied_plan.slot_writes
+    assert any(w.stage_id == "press" for w in applied_plan.slot_writes)
+    # job_reference_id is the PS item id (so slots link back to the Order).
+    assert all(w.job_reference_id == "ps-99" for w in applied_plan.slot_writes)
+
+
+@pytest.mark.asyncio
+async def test_process_event_blending_started_no_link_skips():
+    """A Blend Record with no source-item link → can't correlate → no apply."""
+    from engine.models import BlendingStarted
+
+    with (
+        patch("engine.io.worker.read_snapshot", new_callable=AsyncMock) as mock_snap,
+        patch("engine.io.worker.apply_plan", new_callable=AsyncMock) as mock_apply,
+        patch("engine.io.worker.now_local", return_value=NOW),
+        patch(
+            "engine.io.worker.read_blend_record_ps_item_id",
+            new_callable=AsyncMock,
+        ) as mock_corr,
+        patch(
+            "engine.io.worker.read_ps_item_for_ingest",
+            new_callable=AsyncMock,
+        ) as mock_read,
+    ):
+        mock_snap.return_value = _fake_snapshot()
+        mock_corr.return_value = None
+
+        result = await process_event(BlendingStarted(blend_record_id="blend-legacy"))
+
+    assert result is None
+    mock_read.assert_not_called()
+    mock_apply.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_process_event_blending_started_read_error_skips():
+    """A Blend Record read failure is logged and skipped, not crashed."""
+    from engine.models import BlendingStarted
+    from engine.io.blend_records_io import BlendRecordReadError
+
+    with (
+        patch("engine.io.worker.read_snapshot", new_callable=AsyncMock) as mock_snap,
+        patch("engine.io.worker.apply_plan", new_callable=AsyncMock) as mock_apply,
+        patch("engine.io.worker.now_local", return_value=NOW),
+        patch(
+            "engine.io.worker.read_blend_record_ps_item_id",
+            new_callable=AsyncMock,
+        ) as mock_corr,
+    ):
+        mock_snap.return_value = _fake_snapshot()
+        mock_corr.side_effect = BlendRecordReadError("boom")
+
+        result = await process_event(BlendingStarted(blend_record_id="blend-404"))
+
+    assert result is None
+    mock_apply.assert_not_called()
