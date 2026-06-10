@@ -316,11 +316,21 @@ class Settings(BaseSettings):
         description="Shared secret embedded in the Monday webhook URL path",
     )
 
-    # ── Engine identity (for echo filtering) ─────────────────────────────
-    # Monday webhook payloads include `userId` — the user that triggered
-    # the change. All engine writes go through MONDAY_GRAYSPACE_TOKEN
-    # (bound to a service user, e.g. "Gray Space Force"), so we filter
-    # echoes by matching webhook.userId against the engine's user id.
+    # ── Echo suppression (write-origin registry) ─────────────────────────
+    # How long a recorded engine write suppresses matching webhook events
+    # (engine/io/recent_writes.py). Monday webhook delivery is normally
+    # seconds; the window only needs to outlive delivery + retry jitter.
+    # Codex E4 B1: suppression is by recorded write (item + column + TTL),
+    # NOT by userId — the engine shares its Monday user with real humans.
+    echo_write_ttl_seconds: float = Field(
+        120.0, alias="ECHO_WRITE_TTL_SECONDS",
+        description="TTL for write-origin echo suppression entries",
+    )
+
+    # ── Engine identity ──────────────────────────────────────────────────
+    # Monday user the engine writes as. No longer used for echo filtering
+    # (see echo_write_ttl_seconds above) — retained for logging/diagnostics
+    # and the eventual dedicated-service-account migration.
     # If left blank, detected at startup via `{ me { id } }`.
     engine_monday_user_id: str = Field(
         "", alias="ENGINE_MONDAY_USER_ID",
