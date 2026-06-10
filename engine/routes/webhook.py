@@ -46,7 +46,7 @@ from datetime import datetime, timezone
 
 from engine.config import get_settings
 from engine.core.timezone import now_local
-from engine.io.engine_identity import get_engine_user_id
+from engine.io import recent_writes
 from engine.io.worker import WorkerNotRunning, enqueue_event
 from engine.models import (
     ActualEndReported,
@@ -94,21 +94,21 @@ async def webhook_monday(secret: str, request: Request) -> dict[str, Any]:
         board_id, pulse_id, event_type, user_id,
     )
 
-    # Echo filter — drop our own writes before any dispatch logic.
-    if user_id is not None:
-        try:
-            engine_user = await get_engine_user_id()
-        except Exception:
-            # If we can't determine engine identity, fail open (process the
-            # event) rather than silently swallow real operator changes.
-            log.exception("could not resolve engine user id; processing event without echo filter")
-            engine_user = None
-        if engine_user is not None and user_id == engine_user:
-            log.info(
-                "webhook from engine user (id=%s) — suppressing as echo (board=%s pulse=%s)",
-                user_id, board_id, pulse_id,
-            )
-            return {"status": "ignored", "kind": "echo"}
+    # Echo filter (Codex E4 B1) — suppress by ACTUAL write origin, not user.
+    # The engine shares its Monday user with humans and CLI/agent tokens, so
+    # userId can't discriminate engine writes; instead apply_plan records
+    # every write it performs and only a matching (board, pulse, column)
+    # inside the TTL window is an echo. Boards the engine never writes
+    # (Blend Records, Production Schedule) can never be suppressed.
+    column_id = (event.get("columnId") or None) if isinstance(event, dict) else None
+    if pulse_id is not None and recent_writes.is_engine_echo(
+        board_id, pulse_id, column_id
+    ):
+        log.info(
+            "suppressing engine-write echo (board=%s pulse=%s column=%s user=%s)",
+            board_id, pulse_id, column_id, user_id,
+        )
+        return {"status": "ignored", "kind": "echo"}
 
     s = get_settings()
     if board_id == s.gray_space_capacity_engine_board and pulse_id is not None:
@@ -247,9 +247,9 @@ async def webhook_monday_spec_sheet(secret: str, request: Request) -> dict[str, 
     Engine:
     1. Verifies the URL secret (constant-time compare, same pattern as
        the Phase 1 Blend Records webhook).
-    2. Echo-filters by user id (drops automations triggered by our own
-       writes — though spec-sheet writes shouldn't echo here anyway,
-       this stays as defense in depth).
+    2. Echo-filters via the write-origin registry (Codex E4 B1) — the
+       engine never writes to Production Schedule, so nothing here can
+       ever match; this stays purely as defense in depth.
     3. Extracts the pulseId (Production Schedule item id) from the
        payload.
     4. Enqueues a SpecSheetItemReady event for the worker.
@@ -292,21 +292,19 @@ async def webhook_monday_spec_sheet(secret: str, request: Request) -> dict[str, 
         )
         return {"status": "ignored", "kind": "wrong_board"}
 
-    # Echo filter — only meaningful if the engine ever wrote back to
-    # Production Schedule, which it doesn't (read-only board), but keep
-    # the symmetry with the other webhook handler.
-    if user_id is not None:
-        try:
-            engine_user = await get_engine_user_id()
-        except Exception:
-            log.exception("could not resolve engine user id; processing event without echo filter")
-            engine_user = None
-        if engine_user is not None and user_id == engine_user:
-            log.info(
-                "spec-sheet webhook from engine user (id=%s) — suppressing as echo",
-                user_id,
-            )
-            return {"status": "ignored", "kind": "echo"}
+    # Echo filter (Codex E4 B1) — write-origin registry, kept for symmetry
+    # with the generic handler. The engine never writes to Production
+    # Schedule (read-only board), so the registry never holds entries for
+    # it and this can never suppress — unlike the user-id guard it
+    # replaces, which ate any event from the shared engine user.
+    column_id = (event.get("columnId") or None) if isinstance(event, dict) else None
+    if recent_writes.is_engine_echo(board_id, pulse_id, column_id):
+        log.info(
+            "suppressing engine-write echo on spec-sheet route "
+            "(board=%s pulse=%s column=%s user=%s)",
+            board_id, pulse_id, column_id, user_id,
+        )
+        return {"status": "ignored", "kind": "echo"}
 
     try:
         await enqueue_event(SpecSheetItemReady(item_id=pulse_id))

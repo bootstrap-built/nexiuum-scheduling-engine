@@ -700,3 +700,64 @@ async def test_rollback_failure_keeps_orphan_surfaced():
     assert result.rolled_back_slot_ids == []
     assert result.orphaned_slot_ids == ["9001"]   # rollback couldn't remove it → still an orphan
     assert any("rollback delete failed" in e for e in result.errors)
+
+
+# ─── Echo registry recording (Codex E4 B1) ──────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_apply_plan_records_writes_in_echo_registry():
+    """apply_plan must feed the write-origin echo registry: updates are
+    recorded (column-scoped) on the target board, creates are recorded
+    pulse-scoped once Monday returns the new id. The webhook route relies
+    on these records to tell engine echoes from operator changes."""
+    from engine.config import get_settings
+    from engine.io import recent_writes
+    from engine.io.apply import apply_plan
+
+    plan = Plan(slot_writes=(
+        SlotWrite(slot_id=None, machine_id="12047953695", name="w0"),
+        SlotWrite(slot_id="200", machine_id="12047930644"),
+    ))
+    fake_data = {"w0": {"id": "9001"}, "w1": {"id": "200"}}
+
+    class _FakeClient:
+        async def query_collecting_errors(self, *a, **kw):
+            return fake_data, []
+
+    result = await apply_plan(plan, client=_FakeClient())
+    assert result.success
+
+    board = get_settings().schedule_board("gray_space")
+    # Create: pulse-scoped — any event on the new slot is an echo.
+    assert recent_writes.is_engine_echo(board, "9001", None)
+    assert recent_writes.is_engine_echo(board, "9001", "anything")
+    # Update: column-scoped — the machine column was written...
+    cols = get_settings().schedule_cols("gray_space")
+    assert recent_writes.is_engine_echo(board, "200", cols.machine)
+    # ...but an untouched column on the same slot is NOT an echo.
+    assert not recent_writes.is_engine_echo(board, "200", "definitely_not_written")
+    # And other boards/items are never suppressed.
+    assert not recent_writes.is_engine_echo(18404836849, "200", cols.machine)
+
+
+@pytest.mark.asyncio
+async def test_apply_plan_records_update_even_when_mutation_fails():
+    """Updates are recorded BEFORE the mutation fires (webhook delivery can
+    race our response parsing). A record for a failed write is harmless —
+    TTL-bounded suppression of an event that never arrives."""
+    from engine.config import get_settings
+    from engine.io import recent_writes
+    from engine.io.apply import apply_plan
+
+    plan = Plan(slot_writes=(SlotWrite(slot_id="300", machine_id="12047930644"),))
+
+    class _FakeClient:
+        async def query_collecting_errors(self, *a, **kw):
+            raise RuntimeError("transport down")
+
+    result = await apply_plan(plan, client=_FakeClient())
+    assert not result.success
+    board = get_settings().schedule_board("gray_space")
+    cols = get_settings().schedule_cols("gray_space")
+    assert recent_writes.is_engine_echo(board, "300", cols.machine)

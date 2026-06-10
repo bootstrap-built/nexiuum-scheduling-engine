@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-from engine.io import engine_identity
+from engine.io import engine_identity, recent_writes
 from engine.main import app
 from tests.conftest import TEST_ENGINE_USER_ID, TEST_WEBHOOK_SECRET
 
@@ -17,8 +17,10 @@ WEBHOOK_PATH = f"/webhook/monday/{TEST_WEBHOOK_SECRET}"
 @pytest.fixture
 def client():
     engine_identity.reset_engine_user_id()
+    recent_writes.reset()
     with TestClient(app) as c:
         yield c
+    recent_writes.reset()
 
 
 # ─── Path-secret auth ────────────────────────────────────────────────────
@@ -46,17 +48,19 @@ def test_webhook_returns_challenge_unchanged(client):
     assert resp.json() == {"challenge": "ABC12345"}
 
 
-# ─── Echo filter via userId ──────────────────────────────────────────────
+# ─── Echo filter via write-origin registry (Codex E4 B1) ─────────────────
 
 
-def test_webhook_drops_engine_echo_by_user_id(client):
-    """Event whose userId matches the engine's Monday user → suppressed."""
+def test_webhook_drops_recorded_engine_write_echo(client):
+    """Event matching a write apply_plan recorded → suppressed as echo."""
+    recent_writes.record_write(18413802995, 99999, {"status"}, ttl_seconds=120)
     payload = {
         "event": {
             "boardId": 18413802995,  # Schedule
             "pulseId": 99999,
             "type": "update_column_value",
-            "userId": TEST_ENGINE_USER_ID,  # same user as engine
+            "columnId": "status",
+            "userId": TEST_ENGINE_USER_ID,
         }
     }
     resp = client.post(WEBHOOK_PATH, json=payload)
@@ -64,6 +68,46 @@ def test_webhook_drops_engine_echo_by_user_id(client):
     body = resp.json()
     assert body["status"] == "ignored"
     assert body["kind"] == "echo"
+
+
+def test_webhook_processes_engine_user_event_without_recorded_write(client):
+    """THE B1 regression: an event from the engine's own Monday user is
+    PROCESSED when the engine didn't actually write it — the engine shares
+    its user with humans and CLI tokens (live failure 2026-06-10: an
+    operator Blend Status flip was eaten by the old user-id guard)."""
+    payload = {
+        "event": {
+            "boardId": 18413802995,
+            "pulseId": 99999,
+            "type": "update_column_value",
+            "columnId": "status",
+            "userId": TEST_ENGINE_USER_ID,  # same user as engine — must NOT suppress
+        }
+    }
+    resp = client.post(WEBHOOK_PATH, json=payload)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "received"
+    assert body["kind"] == "schedule_change_unhandled"
+
+
+def test_webhook_recorded_write_does_not_suppress_other_columns(client):
+    """Operator edits a column the engine did NOT write on a slot the
+    engine recently touched → processed (the v1 reflow-hash guard's
+    failure mode, pinned here against regression)."""
+    recent_writes.record_write(18413802995, 99999, {"date4"}, ttl_seconds=120)
+    payload = {
+        "event": {
+            "boardId": 18413802995,
+            "pulseId": 99999,
+            "type": "update_column_value",
+            "columnId": "priority",
+            "userId": "operator-789",
+        }
+    }
+    resp = client.post(WEBHOOK_PATH, json=payload)
+    assert resp.status_code == 200
+    assert resp.json()["kind"] == "schedule_change_unhandled"
 
 
 def test_webhook_processes_operator_change_with_different_user_id(client):
@@ -362,8 +406,11 @@ def test_spec_sheet_webhook_no_pulse_id_ignored(client):
     mock_enq.assert_not_called()
 
 
-def test_spec_sheet_webhook_drops_engine_echo(client):
-    """If our own engine user triggered the change, suppress."""
+def test_spec_sheet_webhook_processes_engine_user_events(client):
+    """B1: the engine never writes to Production Schedule, so NO spec-sheet
+    event is ever an echo — including ones from the engine's own user (the
+    old user-id guard suppressed these; e.g. form fan-outs run under a
+    shared account)."""
     payload = {
         "event": {
             "boardId": PRODUCTION_SCHEDULE_BOARD,
@@ -374,5 +421,5 @@ def test_spec_sheet_webhook_drops_engine_echo(client):
     with patch("engine.routes.webhook.enqueue_event", new_callable=AsyncMock) as mock_enq:
         resp = client.post(SPEC_SHEET_PATH, json=payload)
     assert resp.status_code == 200
-    assert resp.json()["kind"] == "echo"
-    mock_enq.assert_not_called()
+    assert resp.json()["kind"] == "spec_sheet_item_ready"
+    mock_enq.assert_called_once()

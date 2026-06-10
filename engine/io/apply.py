@@ -24,6 +24,7 @@ from typing import Any
 
 from engine.config import ScheduleCols, Settings, get_settings
 from engine.core.timezone import local_to_monday
+from engine.io import recent_writes
 from engine.io.monday import MondayClient, gray_space_client, nexiuum_client
 from engine.models import MondayInstance, Plan, SlotWrite
 
@@ -438,6 +439,22 @@ async def _apply_for_instance(
         indexed_writes, board_id, cols, settings, reflow_hash,
     )
 
+    # Echo registry (Codex E4 B1): record updates BEFORE the mutation fires —
+    # Monday can dispatch the webhook before our HTTP response is parsed, so
+    # recording after would race. A record for a write that then fails is
+    # harmless (TTL-bounded suppression of an event that never comes).
+    # Creates can't be pre-recorded (no id yet); they're recorded in the
+    # alias loop below as ids come back.
+    ttl = settings.echo_write_ttl_seconds
+    for _, write in indexed_writes:
+        if write.slot_id is not None:
+            recent_writes.record_write(
+                board_id,
+                write.slot_id,
+                set(_build_column_values(write, cols, settings, reflow_hash)),
+                ttl_seconds=ttl,
+            )
+
     async def _run(c: MondayClient) -> ApplyResult:
         try:
             data, gql_errors = await c.query_collecting_errors(mutation, variables=variables)
@@ -469,6 +486,11 @@ async def _apply_for_instance(
                 slot_id = str(payload["id"])
                 if write.slot_id is None:
                     created.append(slot_id)
+                    # Engine-created item: any webhook on it inside the TTL
+                    # is an echo (creation entries are pulse-scoped).
+                    recent_writes.record_write(
+                        board_id, slot_id, None, ttl_seconds=ttl,
+                    )
                 else:
                     updated.append(slot_id)
                 if alias_errors:
